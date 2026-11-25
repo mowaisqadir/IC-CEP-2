@@ -1,8 +1,5 @@
 # backend/requirements.txt
-# Python dependencies – not yet finalised.
 fastapi
 uvicorn[standard]
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
-
+pytest
+httpx
