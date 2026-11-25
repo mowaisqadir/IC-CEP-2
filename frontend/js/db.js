@@ -3,6 +3,8 @@
 // See PROJECT_CONTEXT.md §5 for the full schema.
 // This is the single export `db` used by all UI modules and repo.js.
 
+import { uuid } from './utils.js';
+
 const DB_NAME    = 'fieldsync';
 const DB_VERSION = 1;
 
@@ -20,5 +22,45 @@ const SCHEMA = {
 // `Dexie` is a global injected by the CDN <script> in index.html.
 const db = new Dexie(DB_NAME);
 db.version(DB_VERSION).stores(SCHEMA);
+
+// Ensure a persistent device_id exists in meta on first run.
+// Use the `vipDb` argument provided by Dexie's `ready` hook to avoid
+// deadlocking against `db.open()`.
+db.on('ready', async (vipDb) => {
+  const target = vipDb || db;
+  const existing = await target.meta.get('device_id');
+  if (!existing || !existing.value) {
+    await target.meta.put({ key: 'device_id', value: uuid() });
+  }
+});
+
+/**
+ * Read a value from the `meta` key/value store.
+ * @param {string} key
+ * @returns {Promise<any>}
+ */
+export async function getMeta(key) {
+  const row = await db.meta.get(key);
+  return row ? row.value : null;
+}
+
+/**
+ * Write a value to the `meta` key/value store.
+ * @param {string} key
+ * @param {any}    value
+ * @returns {Promise<void>}
+ */
+export async function setMeta(key, value) {
+  await db.meta.put({ key, value });
+}
+
+/**
+ * Delete a key from the `meta` key/value store.
+ * @param {string} key
+ * @returns {Promise<void>}
+ */
+export async function deleteMeta(key) {
+  await db.meta.delete(key);
+}
 
 export { db };

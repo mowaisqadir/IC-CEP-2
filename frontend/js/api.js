@@ -8,6 +8,8 @@
 //                  Dexie meta table (db.meta.get('token')) without
 //                  changing any caller.
 
+import { getMeta, setMeta, deleteMeta } from './db.js';
+
 // ─── Typed error classes ──────────────────────────────────────────────────────
 
 export class NetworkError extends Error {
@@ -39,48 +41,50 @@ export class HttpError extends Error {
   }
 }
 
-// ─── Token store (Phase 1 implementation) ────────────────────────────────────
+// ─── Token store (Dexie meta + in-memory cache) ───────────────────────────────
 // Callers MUST use getToken()/setToken()/clearToken().
-// Phase 3: swap the bodies of these three functions to use Dexie without
-// changing any caller.
-
-const LS_KEY = 'fieldsync_token';
+// hydrateToken() is awaited once at app startup after db.open().
 
 let _memToken = null;
 
 /**
- * Read the current JWT (in-memory first, then localStorage).
- * @returns {string|null}
+ * Hydrate the in-memory token from Dexie `meta` on startup.
+ * @returns {Promise<string|null>}
  */
-export function getToken() {
-  if (_memToken) return _memToken;
-  try {
-    _memToken = localStorage.getItem(LS_KEY);
-  } catch {
-    // localStorage blocked (private mode edge case)
-  }
+export async function hydrateToken() {
+  _memToken = await getMeta('token');
   return _memToken;
 }
 
 /**
- * Persist a JWT.
+ * Read the current JWT (synchronous in-memory cache, hydrated from Dexie meta).
+ * @returns {string|null}
+ */
+export function getToken() {
+  return _memToken;
+}
+
+/**
+ * Persist a JWT to in-memory cache and Dexie `meta`.
  * @param {string} token
+ * @returns {Promise<void>}
  */
 export function setToken(token) {
   _memToken = token;
-  try {
-    localStorage.setItem(LS_KEY, token);
-  } catch { /* ignore */ }
+  return setMeta('token', token).catch((err) => {
+    console.warn('[api] Failed to persist token in meta:', err);
+  });
 }
 
 /**
  * Remove the stored JWT (logout).
+ * @returns {Promise<void>}
  */
 export function clearToken() {
   _memToken = null;
-  try {
-    localStorage.removeItem(LS_KEY);
-  } catch { /* ignore */ }
+  return deleteMeta('token').catch((err) => {
+    console.warn('[api] Failed to clear token from meta:', err);
+  });
 }
 
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────

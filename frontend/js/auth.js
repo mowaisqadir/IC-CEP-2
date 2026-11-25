@@ -1,28 +1,38 @@
 // frontend/js/auth.js
-// Login / logout logic, token + user storage.
-//
-// Token storage uses getToken()/setToken()/clearToken() from api.js
-// (Phase 1: localStorage).  Phase 3 swap: change those three functions
-// in api.js to use Dexie meta — zero changes needed here.
-//
-// User object is stored separately in localStorage (key 'fieldsync_user')
-// so it survives a full page reload while offline.  Phase 3 swap: mirror
-// it also into db.meta with key 'user'.
+// Login / logout logic, token + user storage in Dexie `meta`.
 
-import { apiLogin, setToken, clearToken, getToken } from './api.js';
+import {
+  apiLogin,
+  hydrateToken,
+  setToken,
+  clearToken,
+  getToken,
+} from './api.js';
+import { getMeta, setMeta, deleteMeta } from './db.js';
 
-const LS_USER_KEY = 'fieldsync_user';
+let _memUser = null;
+
+/**
+ * Hydrate token and user from Dexie `meta` on app startup (after db.open()).
+ * @returns {Promise<void>}
+ */
+export async function initAuth() {
+  await hydrateToken();
+  _memUser = await getMeta('user');
+}
 
 // ─── User helpers ─────────────────────────────────────────────────────────────
 
 /**
- * Store the user object returned by the login endpoint.
+ * Store the user object returned by the login endpoint in Dexie `meta`.
  * @param {object} user  - {id, username, display_name}
+ * @returns {Promise<void>}
  */
 export function setUser(user) {
-  try {
-    localStorage.setItem(LS_USER_KEY, JSON.stringify(user));
-  } catch { /* ignore */ }
+  _memUser = user;
+  return setMeta('user', user).catch((err) => {
+    console.warn('[auth] Failed to persist user in meta:', err);
+  });
 }
 
 /**
@@ -30,22 +40,22 @@ export function setUser(user) {
  * @returns {{ id: string, username: string, display_name: string }|null}
  */
 export function getUser() {
-  try {
-    const raw = localStorage.getItem(LS_USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+  return _memUser;
 }
 
 /**
- * Remove all auth credentials (token + user).
+ * Remove all auth credentials (token + user) from Dexie `meta`.
+ * Does NOT delete offline records, projects, or outbox entries.
+ * @returns {Promise<void>}
  */
-export function clearAuth() {
-  clearToken();
-  try {
-    localStorage.removeItem(LS_USER_KEY);
-  } catch { /* ignore */ }
+export async function clearAuth() {
+  _memUser = null;
+  await Promise.all([
+    clearToken(),
+    deleteMeta('user').catch((err) => {
+      console.warn('[auth] Failed to clear user from meta:', err);
+    }),
+  ]);
 }
 
 // ─── Auth state check ─────────────────────────────────────────────────────────
@@ -64,9 +74,9 @@ export function isLoggedIn() {
 // ─── Login action ─────────────────────────────────────────────────────────────
 
 /**
- * Attempt to log in.  Calls POST /api/auth/login.
+ * Attempt to log in. Calls POST /api/auth/login.
  *
- * On success: stores token + user and returns the user object.
+ * On success: stores token + user in Dexie `meta` and returns the user object.
  * On failure: re-throws (NetworkError / AuthError / HttpError).
  *
  * @param {string} username
@@ -74,11 +84,9 @@ export function isLoggedIn() {
  * @returns {Promise<{ id:string, username:string, display_name:string }>}
  */
 export async function login(username, password) {
-  // apiLogin does NOT attach the Bearer header (no token yet).
   const data = await apiLogin(username, password);
-  // data = { token: "...", user: { id, username, display_name } }
-  setToken(data.token);
-  setUser(data.user);
+  await setToken(data.token);
+  await setUser(data.user);
   return data.user;
 }
 
@@ -86,10 +94,11 @@ export async function login(username, password) {
 
 /**
  * Log out the current user.
- * Clears local credentials and redirects to the login route.
- * Does NOT call a server endpoint (stateless JWT).
+ * Clears local credentials from `meta` and redirects to the login route.
+ * Does NOT call a server endpoint (stateless JWT) and does NOT delete
+ * unsynced offline data.
  */
-export function logout() {
-  clearAuth();
+export async function logout() {
+  await clearAuth();
   window.location.hash = '#/login';
 }

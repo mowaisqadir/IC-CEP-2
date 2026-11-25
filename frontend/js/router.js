@@ -48,7 +48,7 @@ function compileRoute(route) {
   const keys = [];
   const src = route
     .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // escape regex special chars
-    .replace(/\\:([A-Za-z_][A-Za-z0-9_]*)/g, (_, key) => {
+    .replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, (_, key) => {
       keys.push(key);
       return '([^/]+)';
     });

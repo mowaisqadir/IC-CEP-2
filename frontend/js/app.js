@@ -1,12 +1,15 @@
 // frontend/js/app.js
 // Entry point: register SW, initialise Dexie, configure router, auth guard.
 
-import { db }             from './db.js';
+import { db, getMeta }    from './db.js';
 import { router }         from './router.js';
-import { isLoggedIn }     from './auth.js';
+import { initAuth, isLoggedIn } from './auth.js';
 import { toast }          from './ui/components.js';
 import { loginView }      from './ui/login.js';
 import { projectsView }   from './ui/projects.js';
+import { recordsView }    from './ui/records.js';
+import { recordFormView, recordDetailView } from './ui/recordForm.js';
+import { settingsView }   from './ui/settings.js';
 
 // ─── Placeholder stubs for routes not yet built (Phase 1) ────────────────────
 // These will be replaced in later phases with real view modules.
@@ -122,9 +125,9 @@ function guarded(viewFn) {
 // ─── Main init ────────────────────────────────────────────────────────────────
 
 async function main() {
-  // 1. Open IndexedDB (Dexie) — this is a no-op if already open.
-  //    We await it so any schema migration completes before the UI renders.
+  // 1. Open IndexedDB (Dexie) and hydrate auth from meta.
   await db.open();
+  await initAuth();
 
   // 2. Register service worker (non-blocking for the rest of init)
   registerServiceWorker();
@@ -144,12 +147,22 @@ async function main() {
       await loginView(params, container);
     })
 
-    .on('#/projects',               guarded(projectsView))
-    .on('#/p/:projectId/records',   guarded(stubView('Records')))
-    .on('#/p/:projectId/records/new', guarded(stubView('New Record')))
-    .on('#/r/:recordId',            guarded(stubView('Record Detail')))
-    .on('#/p/:projectId/tracks',    guarded(stubView('Tracks')))
-    .on('#/settings',               guarded(stubView('Settings')))
+    .on('#/projects',                 guarded(projectsView))
+    .on('#/records',                  guarded(async () => {
+      const lastProjectId = await getMeta('last_project_id');
+      if (lastProjectId) {
+        window.location.hash = `#/p/${encodeURIComponent(lastProjectId)}/records`;
+      } else {
+        toast.info('Select a project to view its records.');
+        window.location.hash = '#/projects';
+      }
+    }))
+    .on('#/p/:projectId/records',     guarded(recordsView))
+    .on('#/p/:projectId/records/new', guarded(recordFormView))
+    .on('#/r/:recordId',              guarded(recordDetailView))
+    .on('#/r/:recordId/edit',         guarded(recordFormView))
+    .on('#/p/:projectId/tracks',      guarded(stubView('Tracks')))
+    .on('#/settings',                 guarded(settingsView))
 
     .notFound(async (_p, container) => {
       // If the user typed a bare hash or nothing, redirect based on auth state.
