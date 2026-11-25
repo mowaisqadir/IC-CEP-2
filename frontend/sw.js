@@ -11,7 +11,7 @@
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 // Bump CACHE_VERSION to force a full cache refresh on next deploy.
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE_STATIC  = `fieldsync-static-${CACHE_VERSION}`;
 
 // ─── App shell to precache ────────────────────────────────────────────────────
@@ -193,5 +193,22 @@ async function _cacheFirstWithRevalidation(request) {
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
+  }
+});
+
+// ─── BACKGROUND SYNC (progressive enhancement) ───────────────────────────────
+// When the browser fires a background sync event (after connectivity is
+// restored), post a message to all open clients so sync.js can run a cycle.
+// This is an optional PE — if the API is unsupported the app still syncs via
+// the online event and 30-second interval.
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'fieldsync-sync') {
+    event.waitUntil(
+      self.clients.matchAll({ type: 'window', includeUncontrolled: false }).then((clients) => {
+        for (const client of clients) {
+          client.postMessage({ type: 'BACKGROUND_SYNC' });
+        }
+      })
+    );
   }
 });

@@ -6,6 +6,27 @@ import { db }            from './db.js';
 import { now as hlcNow } from './hlc.js';
 import { uuid, nowIso }  from './utils.js';
 
+// ─── Write hook (registered by app.js to avoid circular import with sync.js) ──
+
+/** @type {(() => void) | null} */
+let _writeHook = null;
+
+/**
+ * Register a callback that is called after every local write.
+ * Used by app.js to wire in sync.js triggerSync without a circular import.
+ * @param {() => void} fn
+ */
+export function setWriteHook(fn) {
+  _writeHook = fn;
+}
+
+export function notifyWrite() {
+  if (typeof _writeHook === 'function') {
+    try { _writeHook(); } catch { /* ignore */ }
+  }
+}
+const _notifyWrite = notifyWrite;
+
 // ─── Internal transaction helpers ─────────────────────────────────────────────
 
 /**
@@ -119,7 +140,7 @@ export async function getProject(id) {
  * @returns {Promise<object>}
  */
 export async function createRecord(projectId, type, data) {
-  return db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     let lastHlc = initialHlc;
 
@@ -163,6 +184,8 @@ export async function createRecord(projectId, type, data) {
 
     return record;
   });
+  _notifyWrite();
+  return result;
 }
 
 /**
@@ -174,7 +197,7 @@ export async function createRecord(projectId, type, data) {
  * @returns {Promise<object>}
  */
 export async function updateRecord(id, patch) {
-  return db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const record = await db.records.get(id);
     if (!record) throw new Error(`Record not found: ${id}`);
 
@@ -212,6 +235,8 @@ export async function updateRecord(id, patch) {
 
     return updated;
   });
+  _notifyWrite();
+  return result;
 }
 
 /**
@@ -221,7 +246,7 @@ export async function updateRecord(id, patch) {
  * @returns {Promise<object>}
  */
 export async function deleteRecord(id) {
-  return db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const record = await db.records.get(id);
     if (!record) throw new Error(`Record not found: ${id}`);
 
@@ -241,6 +266,8 @@ export async function deleteRecord(id) {
 
     return updated;
   });
+  _notifyWrite();
+  return result;
 }
 
 /**
@@ -250,7 +277,7 @@ export async function deleteRecord(id) {
  * @returns {Promise<object>}
  */
 export async function restoreRecord(id) {
-  return db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const record = await db.records.get(id);
     if (!record) throw new Error(`Record not found: ${id}`);
 
@@ -270,6 +297,8 @@ export async function restoreRecord(id) {
 
     return updated;
   });
+  _notifyWrite();
+  return result;
 }
 
 /**
@@ -353,7 +382,7 @@ const TRACK_META_FIELDS = ['name', 'status', 'started_at', 'ended_at'];
  * @returns {Promise<object>}
  */
 export async function createTrack(projectId, name) {
-  return db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
+  const result = await db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     let lastHlc = initialHlc;
 
@@ -391,6 +420,8 @@ export async function createTrack(projectId, name) {
 
     return track;
   });
+  _notifyWrite();
+  return result;
 }
 
 /**
@@ -402,7 +433,7 @@ export async function createTrack(projectId, name) {
  * @returns {Promise<object>}
  */
 export async function updateTrack(id, patch) {
-  return db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
+  const result = await db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
     const track = await db.tracks.get(id);
     if (!track) throw new Error(`Track not found: ${id}`);
 
@@ -436,6 +467,8 @@ export async function updateTrack(id, patch) {
 
     return nextTrack;
   });
+  _notifyWrite();
+  return result;
 }
 
 /**
@@ -468,6 +501,7 @@ export async function getTrack(id) {
 export async function bulkPutTrackPoints(points) {
   if (!Array.isArray(points) || points.length === 0) return;
   await db.track_points.bulkPut(points);
+  _notifyWrite();
 }
 
 /**

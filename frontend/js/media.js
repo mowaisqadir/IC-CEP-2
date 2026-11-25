@@ -3,6 +3,7 @@
 // Note: Remote deletion of media is out of scope for v1 (soft-delete is local only).
 
 import { db, getMeta, setMeta } from './db.js';
+import { notifyWrite }            from './repo.js';
 import { uuid, nowIso }          from './utils.js';
 
 export const MAX_IMAGE_EDGE = 1600;
@@ -196,7 +197,7 @@ export async function addPhoto(recordId, file) {
 
   const processed = await processImage(file);
 
-  return db.transaction('rw', db.media, db.records, db.meta, async () => {
+  const row = await db.transaction('rw', db.media, db.records, db.meta, async () => {
     const record = await db.records.get(recordId);
     if (!record) {
       throw new Error(`Record not found: ${recordId}`);
@@ -205,7 +206,7 @@ export async function addPhoto(recordId, file) {
     const userRow   = await db.meta.get('user');
     const createdBy = userRow?.value?.id ?? 'unknown';
 
-    const row = {
+    const mediaRow = {
       id:           uuid(),
       record_id:    recordId,
       project_id:   record.project_id,
@@ -222,9 +223,11 @@ export async function addPhoto(recordId, file) {
       deleted:      false,
     };
 
-    await db.media.add(row);
-    return row;
+    await db.media.add(mediaRow);
+    return mediaRow;
   });
+  notifyWrite();
+  return row;
 }
 
 /**

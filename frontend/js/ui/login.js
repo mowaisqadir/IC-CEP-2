@@ -11,6 +11,7 @@
 import { login } from '../auth.js';
 import { NetworkError, AuthError } from '../api.js';
 import { toast } from './components.js';
+import { notifyLoginSuccess } from '../sync.js';
 
 /**
  * @param {object}      _params     - unused (no route params on /login)
@@ -120,6 +121,9 @@ export async function loginView(_params, container) {
 
     try {
       await login(username, password);
+
+      // Notify sync engine that auth is fresh — clears the blocked state
+      notifyLoginSuccess();
 
       // Prompt for persistent storage (best-effort; ignore rejection)
       if (navigator.storage && navigator.storage.persist) {

@@ -11,7 +11,8 @@ import { recordsView }    from './ui/records.js';
 import { recordFormView, recordDetailView } from './ui/recordForm.js';
 import { tracksView, trackDetailView }      from './ui/tracks.js';
 import { settingsView }   from './ui/settings.js';
-import { markInterruptedTracks } from './repo.js';
+import { markInterruptedTracks, setWriteHook } from './repo.js';
+import { initSync, triggerSync } from './sync.js';
 
 // ─── Placeholder stubs for routes not yet built (Phase 1) ────────────────────
 // These will be replaced in later phases with real view modules.
@@ -137,6 +138,11 @@ async function main() {
 
   // 3. Online/offline pill
   initConnectivityIndicator();
+
+  // 3b. Initialise sync engine (triggers, badge, background sync)
+  //     Must come after initAuth() so the token is hydrated.
+  setWriteHook(triggerSync);
+  initSync();
 
   // 4. Configure routes
   router
