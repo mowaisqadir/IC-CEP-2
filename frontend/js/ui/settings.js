@@ -4,6 +4,11 @@
 import { getMeta }           from '../db.js';
 import { getUser, logout }   from '../auth.js';
 import { getOutboxCount }    from '../repo.js';
+import {
+  getStorageStatus,
+  requestPersistentStorage,
+  formatBytes,
+} from '../media.js';
 import { createPageHeader, toast } from './components.js';
 import { escapeHtml }        from '../utils.js';
 
@@ -15,9 +20,10 @@ export async function settingsView(_params, container) {
   container.innerHTML = '';
   container.appendChild(createPageHeader({ title: 'Settings' }));
 
-  const [deviceId, pendingCount] = await Promise.all([
+  const [deviceId, pendingCount, storage] = await Promise.all([
     getMeta('device_id'),
     getOutboxCount(),
+    getStorageStatus(),
   ]);
   const user = getUser();
 
@@ -67,6 +73,66 @@ export async function settingsView(_params, container) {
     </dl>
   `;
   stack.appendChild(deviceCard);
+
+  // ── Storage Quota Meter card ────────────────────────────────────────────
+  const storageCard = document.createElement('div');
+  storageCard.className = 'card stack stack--sm';
+
+  if (!storage.supported) {
+    storageCard.innerHTML = `
+      <div class="card__title">Storage Quota</div>
+      <p class="text-sm text-muted">Storage estimation is not supported in this browser.</p>
+    `;
+  } else {
+    const pct = Math.min(100, Math.round(storage.usagePct * 10) / 10);
+    const fillClass = storage.lowSpace ? 'danger' : pct > 80 ? 'warn' : '';
+    const warnings = [];
+    if (storage.lowSpace) {
+      warnings.push('Less than 20 MB remaining — new photo capture is blocked until space is freed.');
+    } else if (pct > 80) {
+      warnings.push(`Storage usage is at ${pct}% (> 80% of quota). Consider syncing and freeing space.`);
+    }
+    if (storage.persistDenied) {
+      warnings.push('Persistent storage was denied by the browser. Offline data may be evicted under storage pressure.');
+    }
+
+    storageCard.innerHTML = `
+      <div class="row row--between">
+        <div class="card__title" style="margin:0">Storage Quota</div>
+        <span class="text-xs text-muted">${pct}% used</span>
+      </div>
+      <div class="storage-meter" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+        <div class="storage-meter__fill ${fillClass}" style="width:${pct}%"></div>
+      </div>
+      <div class="row row--between text-xs text-muted">
+        <span>Used: ${escapeHtml(formatBytes(storage.usage))}</span>
+        <span>Quota: ${escapeHtml(formatBytes(storage.quota))}</span>
+      </div>
+      ${storage.persisted === true
+        ? `<span class="badge badge--success" style="align-self:flex-start">Persistent storage granted</span>`
+        : `<button type="button" id="persist-storage-btn" class="btn btn--secondary">Request Persistent Storage</button>`}
+      ${warnings.map((w) => `
+        <div class="offline-banner" role="status" style="margin:0">
+          <span aria-hidden="true">⚠️</span>
+          <span>${escapeHtml(w)}</span>
+        </div>
+      `).join('')}
+    `;
+
+    const persistBtn = storageCard.querySelector('#persist-storage-btn');
+    if (persistBtn) {
+      persistBtn.addEventListener('click', async () => {
+        const granted = await requestPersistentStorage();
+        if (granted) {
+          toast.success('Persistent storage granted.');
+        } else {
+          toast.warn('Persistent storage was denied by the browser.');
+        }
+        settingsView(_params, container);
+      });
+    }
+  }
+  stack.appendChild(storageCard);
 
   // ── Logout card ─────────────────────────────────────────────────────────
   const sessionCard = document.createElement('div');

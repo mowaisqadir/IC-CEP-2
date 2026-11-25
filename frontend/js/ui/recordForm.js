@@ -19,6 +19,15 @@ import {
 } from '../schemas.js';
 import { toast, createEmptyState } from './components.js';
 import { escapeHtml, formatDate }  from '../utils.js';
+import { captureCurrentPosition }    from '../gps.js';
+import {
+  addPhoto,
+  listMediaForRecord,
+  softDeleteMedia,
+  assertSufficientStorage,
+  formatBytes,
+} from '../media.js';
+import { router } from '../router.js';
 
 // ─── Create / Edit Form View ──────────────────────────────────────────────────
 
@@ -49,6 +58,21 @@ export async function recordFormView(params, container) {
   }
 
   let currentType = isEdit ? existing.type : 'soil';
+  let capturedGeo = isEdit && existing.data?.lat !== undefined && existing.data?.lat !== null
+    ? {
+        lat:      existing.data.lat,
+        lng:      existing.data.lng,
+        accuracy: existing.data.accuracy ?? null,
+        altitude: existing.data.altitude ?? null,
+      }
+    : null;
+  const stagedFiles = [];
+  const activeUrls  = new Set();
+  router.onCleanup(() => {
+    for (const u of activeUrls) URL.revokeObjectURL(u);
+    activeUrls.clear();
+  });
+
   const backHref = isEdit
     ? `#/r/${encodeURIComponent(existing.id)}`
     : `#/p/${encodeURIComponent(projectId)}/records`;
@@ -125,6 +149,31 @@ export async function recordFormView(params, container) {
       form.appendChild(_buildFieldGroup(field, initialData[field.key]));
     }
 
+    // ── GPS Location section ──────────────────────────────────────────────
+    const gpsSection = _buildGpsSection({
+      getGeo: () => capturedGeo,
+      onCapture: async () => {
+        const geo = await captureCurrentPosition();
+        capturedGeo = geo;
+        if (isEdit) {
+          existing = await updateRecord(existing.id, geo);
+          toast.success('Location saved to record.');
+        } else {
+          toast.success('Location captured.');
+        }
+        return geo;
+      },
+    });
+    form.appendChild(gpsSection);
+
+    // ── Photos section ────────────────────────────────────────────────────
+    const photoSection = _buildPhotoSection({
+      recordId: isEdit ? existing.id : null,
+      stagedFiles,
+      activeUrls,
+    });
+    form.appendChild(photoSection);
+
     const actions = document.createElement('div');
     actions.className = 'stack stack--sm';
     actions.style.marginTop = 'var(--space-2)';
@@ -176,13 +225,23 @@ export async function recordFormView(params, container) {
       return;
     }
 
+    if (capturedGeo) {
+      data.lat      = capturedGeo.lat;
+      data.lng      = capturedGeo.lng;
+      data.accuracy = capturedGeo.accuracy;
+      data.altitude = capturedGeo.altitude;
+    }
+
     try {
       if (isEdit) {
         await updateRecord(existing.id, data);
         toast.success('Observation updated.');
         window.location.hash = `#/r/${encodeURIComponent(existing.id)}`;
       } else {
-        await createRecord(projectId, currentType, data);
+        const created = await createRecord(projectId, currentType, data);
+        for (const file of stagedFiles) {
+          await addPhoto(created.id, file);
+        }
         toast.success('Observation saved offline.');
         window.location.hash = `#/p/${encodeURIComponent(projectId)}/records`;
       }
@@ -226,6 +285,12 @@ export async function recordDetailView(params, container) {
   const schema    = getSchema(record.type);
   const isPending = pendingIds.has(record.id);
   const backHref  = `#/p/${encodeURIComponent(record.project_id)}/records`;
+
+  const activeUrls = new Set();
+  router.onCleanup(() => {
+    for (const u of activeUrls) URL.revokeObjectURL(u);
+    activeUrls.clear();
+  });
 
   const header = document.createElement('div');
   header.className = 'page-header';
@@ -274,6 +339,32 @@ export async function recordDetailView(params, container) {
     dl.appendChild(row);
   }
   card.appendChild(dl);
+
+  // GPS Coordinates (if captured)
+  if (record.data?.lat !== undefined && record.data?.lat !== null) {
+    const gpsBox = document.createElement('div');
+    gpsBox.className = 'gps-box stack stack--sm';
+    const acc = record.data.accuracy;
+    const alt = record.data.altitude;
+    gpsBox.innerHTML = `
+      <div class="row row--between">
+        <span class="text-sm font-medium">📍 Location</span>
+        ${acc !== null && acc !== undefined
+          ? `<span class="badge ${acc > 50 ? 'badge--warn' : 'badge--success'}">±${Math.round(acc)} m</span>`
+          : ''}
+      </div>
+      <div class="gps-coords">${escapeHtml(String(record.data.lat))}, ${escapeHtml(String(record.data.lng))}${alt !== null && alt !== undefined ? ` · Alt ${escapeHtml(String(alt))} m` : ''}</div>
+      ${acc > 50
+        ? `<div class="text-xs text-muted">⚠️ Low GPS accuracy (&gt; 50 m). Consider recapturing outdoors.</div>`
+        : ''}
+    `;
+    card.appendChild(gpsBox);
+  }
+
+  // Photos Gallery + Add Photo
+  if (!record.deleted) {
+    card.appendChild(_buildPhotoSection({ recordId: record.id, activeUrls }));
+  }
 
   const actions = document.createElement('div');
   actions.className = 'stack stack--sm';
@@ -408,4 +499,288 @@ function _applyValidationErrors(form, schema, errors) {
       errEl.hidden = !msg;
     }
   }
+}
+
+// ─── GPS Capture Section ──────────────────────────────────────────────────────
+
+function _buildGpsSection({ getGeo, onCapture }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'gps-box stack stack--sm';
+
+  const headerRow = document.createElement('div');
+  headerRow.className = 'row row--between';
+  headerRow.innerHTML = `<span class="form-label" style="margin:0">GPS Location</span>`;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn--secondary';
+  btn.textContent = '📍 Capture location';
+  headerRow.appendChild(btn);
+  wrap.appendChild(headerRow);
+
+  const infoEl = document.createElement('div');
+  infoEl.className = 'stack stack--sm';
+  wrap.appendChild(infoEl);
+
+  function renderInfo() {
+    const geo = getGeo();
+    if (!geo) {
+      infoEl.innerHTML = `<span class="text-xs text-muted">No coordinates captured yet.</span>`;
+      return;
+    }
+    const acc = geo.accuracy;
+    const alt = geo.altitude;
+    infoEl.innerHTML = `
+      <div class="row row--between">
+        <span class="gps-coords">${escapeHtml(String(geo.lat))}, ${escapeHtml(String(geo.lng))}</span>
+        ${acc !== null && acc !== undefined
+          ? `<span class="badge ${acc > 50 ? 'badge--warn' : 'badge--success'}">±${Math.round(acc)} m</span>`
+          : ''}
+      </div>
+      <div class="text-xs text-muted">
+        Accuracy: ${acc !== null && acc !== undefined ? `${acc} m` : '—'} · Altitude: ${alt !== null && alt !== undefined ? `${alt} m` : '—'}
+      </div>
+      ${acc > 50
+        ? `<div class="offline-banner" role="status" style="margin:0">
+             <span aria-hidden="true">⚠️</span>
+             <span>GPS accuracy is ${Math.round(acc)} m (&gt; 50 m). Move to open sky and recapture for better precision.</span>
+           </div>`
+        : ''}
+    `;
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = '📡 Capturing…';
+    try {
+      await onCapture();
+      renderInfo();
+    } catch (err) {
+      toast.error(err.message || 'Failed to capture GPS location.');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📍 Capture location';
+    }
+  });
+
+  renderInfo();
+  return wrap;
+}
+
+// ─── Photo Gallery & Capture Section ──────────────────────────────────────────
+
+function _buildPhotoSection({ recordId, stagedFiles = null, activeUrls }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'gps-box stack stack--sm';
+
+  const headerRow = document.createElement('div');
+  headerRow.className = 'row row--between';
+  headerRow.style.flexWrap = 'wrap';
+  headerRow.innerHTML = `<span class="form-label" style="margin:0">Photos</span>`;
+
+  const btnGroup = document.createElement('div');
+  btnGroup.className = 'row';
+  btnGroup.style.gap = 'var(--space-2)';
+
+  const camInput = document.createElement('input');
+  camInput.type     = 'file';
+  camInput.accept   = 'image/*';
+  camInput.capture  = 'environment';
+  camInput.multiple = true;
+  camInput.hidden   = true;
+
+  const galInput = document.createElement('input');
+  galInput.type     = 'file';
+  galInput.accept   = 'image/*';
+  galInput.multiple = true;
+  galInput.hidden   = true;
+
+  const camBtn = document.createElement('button');
+  camBtn.type      = 'button';
+  camBtn.className = 'btn btn--secondary';
+  camBtn.textContent = '📷 Add photo';
+  camBtn.addEventListener('click', () => camInput.click());
+
+  const galBtn = document.createElement('button');
+  galBtn.type      = 'button';
+  galBtn.className = 'btn btn--ghost';
+  galBtn.textContent = '🖼️ Gallery';
+  galBtn.addEventListener('click', () => galInput.click());
+
+  btnGroup.appendChild(camBtn);
+  btnGroup.appendChild(galBtn);
+  btnGroup.appendChild(camInput);
+  btnGroup.appendChild(galInput);
+  headerRow.appendChild(btnGroup);
+  wrap.appendChild(headerRow);
+
+  const strip = document.createElement('div');
+  strip.className = 'photo-strip';
+  wrap.appendChild(strip);
+
+  const localThumbUrls = new Set();
+
+  function revokeLocalThumbs() {
+    for (const u of localThumbUrls) {
+      URL.revokeObjectURL(u);
+      activeUrls.delete(u);
+    }
+    localThumbUrls.clear();
+  }
+
+  async function renderStrip() {
+    revokeLocalThumbs();
+    strip.innerHTML = '';
+
+    if (recordId) {
+      const items = await listMediaForRecord(recordId);
+      if (items.length === 0) {
+        strip.innerHTML = `<span class="text-xs text-muted">No photos attached yet.</span>`;
+        return;
+      }
+      for (const item of items) {
+        const thumbSrc = item.thumb_blob || item.blob;
+        const url = URL.createObjectURL(thumbSrc);
+        localThumbUrls.add(url);
+        activeUrls.add(url);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'photo-thumb-btn';
+        btn.setAttribute('aria-label', 'View photo');
+        btn.innerHTML = `
+          <img src="${url}" alt="Field observation photo" />
+          <span class="photo-thumb-badge">${item.upload_state === 'done' ? '✓' : '⏳'}</span>
+        `;
+        btn.addEventListener('click', () => {
+          _openPhotoViewer(item, async () => {
+            await softDeleteMedia(item.id);
+            toast.info('Photo deleted locally.');
+            await renderStrip();
+          });
+        });
+        strip.appendChild(btn);
+      }
+      return;
+    }
+
+    // Staged files (create mode before record is saved)
+    if (!stagedFiles || stagedFiles.length === 0) {
+      strip.innerHTML = `<span class="text-xs text-muted">No photos selected yet.</span>`;
+      return;
+    }
+    stagedFiles.forEach((file, index) => {
+      const url = URL.createObjectURL(file);
+      localThumbUrls.add(url);
+      activeUrls.add(url);
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'photo-thumb-btn';
+      btn.setAttribute('aria-label', 'Remove staged photo');
+      btn.innerHTML = `
+        <img src="${url}" alt="Staged photo" />
+        <span class="photo-thumb-badge">✕</span>
+      `;
+      btn.addEventListener('click', () => {
+        if (window.confirm('Remove this staged photo?')) {
+          stagedFiles.splice(index, 1);
+          renderStrip();
+        }
+      });
+      strip.appendChild(btn);
+    });
+  }
+
+  async function handleFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+
+    camBtn.disabled = true;
+    galBtn.disabled = true;
+    camBtn.textContent = 'Processing…';
+
+    try {
+      await assertSufficientStorage();
+      if (recordId) {
+        for (const file of files) {
+          await addPhoto(recordId, file);
+        }
+        toast.success(`${files.length} photo(s) saved offline.`);
+      } else if (stagedFiles) {
+        stagedFiles.push(...files);
+        toast.info(`${files.length} photo(s) staged. Save observation to store.`);
+      }
+      await renderStrip();
+    } catch (err) {
+      toast.error(err.message || 'Failed to add photo.');
+    } finally {
+      camInput.value = '';
+      galInput.value = '';
+      camBtn.disabled = false;
+      galBtn.disabled = false;
+      camBtn.textContent = '📷 Add photo';
+    }
+  }
+
+  camInput.addEventListener('change', (e) => handleFiles(e.target.files));
+  galInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+  renderStrip();
+  return wrap;
+}
+
+function _openPhotoViewer(mediaItem, onDelete) {
+  const fullUrl = URL.createObjectURL(mediaItem.blob || mediaItem.thumb_blob);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'photo-viewer';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Photo viewer');
+
+  const dims = mediaItem.width && mediaItem.height ? `${mediaItem.width}×${mediaItem.height}` : '';
+  const size = mediaItem.size ? formatBytes(mediaItem.size) : '';
+
+  overlay.innerHTML = `
+    <div class="photo-viewer__bar">
+      <div class="text-xs">
+        <div>${escapeHtml([dims, size].filter(Boolean).join(' · '))}</div>
+        <div style="opacity:0.75">${mediaItem.upload_state === 'done' ? 'Uploaded' : 'Pending upload'}</div>
+      </div>
+      <div class="row" style="gap:var(--space-2)">
+        <button type="button" class="btn btn--danger" id="pv-delete">🗑️ Delete</button>
+        <button type="button" class="btn btn--secondary" id="pv-close">✕ Close</button>
+      </div>
+    </div>
+    <div class="photo-viewer__stage">
+      <img class="photo-viewer__img" src="${fullUrl}" alt="Full-size field photo" />
+    </div>
+  `;
+
+  function close() {
+    document.removeEventListener('keydown', onKeyDown);
+    URL.revokeObjectURL(fullUrl);
+    overlay.remove();
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Escape') close();
+  }
+
+  overlay.querySelector('#pv-close').addEventListener('click', close);
+  overlay.querySelector('#pv-delete').addEventListener('click', async () => {
+    if (!window.confirm('Delete this photo locally? (Remote deletion is not supported in v1.)')) {
+      return;
+    }
+    try {
+      await onDelete();
+      close();
+    } catch (err) {
+      toast.error(err.message || 'Failed to delete photo.');
+    }
+  });
+
+  document.addEventListener('keydown', onKeyDown);
+  document.body.appendChild(overlay);
 }

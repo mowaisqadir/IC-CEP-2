@@ -9,7 +9,9 @@ import { loginView }      from './ui/login.js';
 import { projectsView }   from './ui/projects.js';
 import { recordsView }    from './ui/records.js';
 import { recordFormView, recordDetailView } from './ui/recordForm.js';
+import { tracksView, trackDetailView }      from './ui/tracks.js';
 import { settingsView }   from './ui/settings.js';
+import { markInterruptedTracks } from './repo.js';
 
 // ─── Placeholder stubs for routes not yet built (Phase 1) ────────────────────
 // These will be replaced in later phases with real view modules.
@@ -125,9 +127,10 @@ function guarded(viewFn) {
 // ─── Main init ────────────────────────────────────────────────────────────────
 
 async function main() {
-  // 1. Open IndexedDB (Dexie) and hydrate auth from meta.
+  // 1. Open IndexedDB (Dexie), hydrate auth, and mark any crashed recordings interrupted.
   await db.open();
   await initAuth();
+  await markInterruptedTracks();
 
   // 2. Register service worker (non-blocking for the rest of init)
   registerServiceWorker();
@@ -161,7 +164,17 @@ async function main() {
     .on('#/p/:projectId/records/new', guarded(recordFormView))
     .on('#/r/:recordId',              guarded(recordDetailView))
     .on('#/r/:recordId/edit',         guarded(recordFormView))
-    .on('#/p/:projectId/tracks',      guarded(stubView('Tracks')))
+    .on('#/tracks',                   guarded(async () => {
+      const lastProjectId = await getMeta('last_project_id');
+      if (lastProjectId) {
+        window.location.hash = `#/p/${encodeURIComponent(lastProjectId)}/tracks`;
+      } else {
+        toast.info('Select a project to view its tracks.');
+        window.location.hash = '#/projects';
+      }
+    }))
+    .on('#/p/:projectId/tracks',      guarded(tracksView))
+    .on('#/t/:trackId',               guarded(trackDetailView))
     .on('#/settings',                 guarded(settingsView))
 
     .notFound(async (_p, container) => {

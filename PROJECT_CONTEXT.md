@@ -74,13 +74,14 @@ The core observation entity.
 
 **Common optional `data` fields** (all record types must accept them):
 
-| Key           | Type   | Notes                        |
-| ------------- | ------ | ---------------------------- |
-| `lat`         | number | WGS-84 latitude              |
-| `lng`         | number | WGS-84 longitude             |
-| `accuracy`    | number | GPS accuracy in metres       |
-| `observed_at` | string | ISO 8601 UTC                 |
-| `notes`       | string | free-text field notes        |
+| Key           | Type           | Notes                                |
+| ------------- | -------------- | ------------------------------------ |
+| `lat`         | number         | WGS-84 latitude                      |
+| `lng`         | number         | WGS-84 longitude                     |
+| `accuracy`    | number         | GPS accuracy in metres               |
+| `altitude`    | number \| null | GPS altitude in metres above WGS-84  |
+| `observed_at` | string         | ISO 8601 UTC                         |
+| `notes`       | string         | free-text field notes                |
 
 Type-specific fields come from `frontend/js/schemas.js` and are validated there.
 
@@ -109,6 +110,7 @@ file store); this record holds only metadata.
 | `thumb_blob`  | Blob \| null                             | ≤320 px thumbnail                   |
 | `meta_synced` | boolean                                  | metadata PUT acknowledged by server |
 | `upload_state`| `'pending'\|'uploading'\|'done'\|'error'`| upload lifecycle                    |
+| `deleted`     | boolean                                  | local soft-delete flag (remote deletion of media is out of scope for v1) |
 
 ### 2.6 `track`
 
@@ -121,8 +123,9 @@ A GPS track session.
 | `name`       | string                      | user-given label   |
 | `started_at` | string                      | ISO 8601 UTC       |
 | `ended_at`   | string \| null              | ISO 8601 UTC       |
-| `status`     | `'recording'\|'paused'\|'stopped'` |               |
+| `status`     | `'recording'\|'paused'\|'stopped'\|'interrupted'` | `'interrupted'` set on reload if app closed while `'recording'` |
 | `created_by` | string                      | user UUID          |
+| `fv`         | `{field: hlc}`              | Dexie-only per-field HLC for metadata (`name`, `status`, `started_at`, `ended_at`) |
 
 ### 2.7 `track_point`
 
@@ -137,6 +140,7 @@ Append-only. PK is composite `(track_id, idx)`.
 | `accuracy` | number         | metres                    |
 | `altitude` | number \| null | metres above WGS-84       |
 | `ts`       | string         | ISO 8601 UTC              |
+| `synced`   | `0 \| 1`       | Dexie-only upload flag (numeric because IndexedDB cannot index booleans) |
 
 ---
 
@@ -349,8 +353,8 @@ GET /health  →  { "status": "ok" }
    IndexedDB (Section 4). Store `next_seq` as new `last_pull_seq`.
 3. **Media upload** — for each `media` row with `upload_state = 'pending'`, PUT
    raw bytes to `/media/{id}`. Set `upload_state = 'done'` on success.
-4. **Track points upload** — for each `track_points` row with `synced = false`,
-   POST to `/tracks/{id}/points`. Set `synced = true` on success.
+4. **Track points upload** — for each `track_points` row with `synced = 0`,
+   POST to `/tracks/{id}/points`. Set `synced = 1` on success.
 
 **Triggers:**
 
@@ -447,5 +451,5 @@ IC-CEP-2/
 
 ---
 
-*Last updated: Phase 0 — Skeleton & Contract*
+*Last updated: Phase 2 — Photos & GPS (offline-only)*
 

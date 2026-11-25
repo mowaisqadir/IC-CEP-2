@@ -24,17 +24,19 @@ async function _readClockMeta() {
 }
 
 /**
- * Append or coalesce field changes into the outbox for a record.
+ * Append or coalesce field changes into the outbox for an entity ('record' or 'track').
  * Must be called inside an active RW transaction that includes `outbox`.
  *
- * @param {object} record
+ * @param {'record'|'track'} entity
+ * @param {object}           row
  * @param {Record<string, { v: any, hlc: string }>} changedFields
+ * @param {object}           base
  */
-async function _enqueueOutbox(record, changedFields) {
+async function _enqueueOutbox(entity, row, changedFields, base) {
   const existing = await db.outbox
     .where('entity')
-    .equals('record')
-    .filter((row) => row.entity_id === record.id)
+    .equals(entity)
+    .filter((entry) => entry.entity_id === row.id)
     .first();
 
   if (existing) {
@@ -46,16 +48,27 @@ async function _enqueueOutbox(record, changedFields) {
 
   await db.outbox.add({
     change_id:  uuid(),
-    entity:     'record',
-    entity_id:  record.id,
-    project_id: record.project_id,
+    entity,
+    entity_id:  row.id,
+    project_id: row.project_id,
     fields:     changedFields,
-    base: {
-      type:       record.type,
-      created_by: record.created_by,
-      created_at: record.created_at,
-    },
+    base,
   });
+}
+
+function _recordBase(record) {
+  return {
+    type:       record.type,
+    created_by: record.created_by,
+    created_at: record.created_at,
+  };
+}
+
+function _trackBase(track) {
+  return {
+    created_by: track.created_by,
+    created_at: track.started_at,
+  };
 }
 
 function _valuesEqual(a, b) {
@@ -145,7 +158,7 @@ export async function createRecord(projectId, type, data) {
     };
 
     await db.records.add(record);
-    await _enqueueOutbox(record, fields);
+    await _enqueueOutbox('record', record, fields, _recordBase(record));
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return record;
@@ -194,7 +207,7 @@ export async function updateRecord(id, patch) {
     };
 
     await db.records.put(updated);
-    await _enqueueOutbox(updated, changedFields);
+    await _enqueueOutbox('record', updated, changedFields, _recordBase(updated));
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return updated;
@@ -223,7 +236,7 @@ export async function deleteRecord(id) {
     };
 
     await db.records.put(updated);
-    await _enqueueOutbox(updated, { deleted: { v: true, hlc: lastHlc } });
+    await _enqueueOutbox('record', updated, { deleted: { v: true, hlc: lastHlc } }, _recordBase(updated));
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return updated;
@@ -252,7 +265,7 @@ export async function restoreRecord(id) {
     };
 
     await db.records.put(updated);
-    await _enqueueOutbox(updated, { deleted: { v: false, hlc: lastHlc } });
+    await _enqueueOutbox('record', updated, { deleted: { v: false, hlc: lastHlc } }, _recordBase(updated));
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return updated;
@@ -326,4 +339,169 @@ export async function getPendingRecordIds() {
  */
 export async function getOutboxCount() {
   return db.outbox.count();
+}
+
+// ─── Tracks & Track Points ────────────────────────────────────────────────────
+
+const TRACK_META_FIELDS = ['name', 'status', 'started_at', 'ended_at'];
+
+/**
+ * Create a new GPS track in `recording` status and enqueue its metadata in outbox.
+ *
+ * @param {string} projectId
+ * @param {string} name
+ * @returns {Promise<object>}
+ */
+export async function createTrack(projectId, name) {
+  return db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
+    const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
+    let lastHlc = initialHlc;
+
+    const userRow   = await db.meta.get('user');
+    const createdBy = userRow?.value?.id ?? 'unknown';
+    const startedAt = nowIso();
+    const id        = uuid();
+
+    const metaValues = {
+      name:       (name || '').trim() || `Track ${startedAt.slice(0, 16).replace('T', ' ')}`,
+      status:     'recording',
+      started_at: startedAt,
+      ended_at:   null,
+    };
+
+    const fv     = {};
+    const fields = {};
+    for (const key of TRACK_META_FIELDS) {
+      lastHlc     = hlcNow(lastHlc, deviceId);
+      fv[key]     = lastHlc;
+      fields[key] = { v: metaValues[key], hlc: lastHlc };
+    }
+
+    const track = {
+      id,
+      project_id: projectId,
+      ...metaValues,
+      created_by: createdBy,
+      fv,
+    };
+
+    await db.tracks.add(track);
+    await _enqueueOutbox('track', track, fields, _trackBase(track));
+    await db.meta.put({ key: 'hlc_last', value: lastHlc });
+
+    return track;
+  });
+}
+
+/**
+ * Update track metadata fields (name, status, started_at, ended_at) with HLCs
+ * and coalesce into the outbox.
+ *
+ * @param {string} id
+ * @param {Record<string, any>} patch
+ * @returns {Promise<object>}
+ */
+export async function updateTrack(id, patch) {
+  return db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
+    const track = await db.tracks.get(id);
+    if (!track) throw new Error(`Track not found: ${id}`);
+
+    const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
+    let lastHlc = initialHlc;
+
+    const nextFv        = { ...(track.fv || {}) };
+    const nextTrack     = { ...track };
+    const changedFields = {};
+
+    for (const key of TRACK_META_FIELDS) {
+      if (!(key in (patch || {}))) continue;
+      const val  = patch[key] === undefined ? null : patch[key];
+      const prev = track[key] === undefined ? null : track[key];
+      if (_valuesEqual(prev, val)) continue;
+
+      lastHlc            = hlcNow(lastHlc, deviceId);
+      nextTrack[key]     = val;
+      nextFv[key]        = lastHlc;
+      changedFields[key] = { v: val, hlc: lastHlc };
+    }
+
+    if (Object.keys(changedFields).length === 0) {
+      return track;
+    }
+
+    nextTrack.fv = nextFv;
+    await db.tracks.put(nextTrack);
+    await _enqueueOutbox('track', nextTrack, changedFields, _trackBase(nextTrack));
+    await db.meta.put({ key: 'hlc_last', value: lastHlc });
+
+    return nextTrack;
+  });
+}
+
+/**
+ * List all tracks for a project, newest first.
+ * @param {string} projectId
+ * @returns {Promise<Array<object>>}
+ */
+export async function listTracks(projectId) {
+  const rows = await db.tracks.where('project_id').equals(projectId).toArray();
+  rows.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
+  return rows;
+}
+
+/**
+ * Get a single track by ID.
+ * @param {string} id
+ * @returns {Promise<object | undefined>}
+ */
+export async function getTrack(id) {
+  return db.tracks.get(id);
+}
+
+/**
+ * Flush a batch of GPS track points to IndexedDB.
+ * Points are NOT placed in the outbox; they sync via `synced: 0`.
+ *
+ * @param {Array<object>} points
+ * @returns {Promise<void>}
+ */
+export async function bulkPutTrackPoints(points) {
+  if (!Array.isArray(points) || points.length === 0) return;
+  await db.track_points.bulkPut(points);
+}
+
+/**
+ * Get all points for a track ordered by `idx`.
+ * @param {string} trackId
+ * @returns {Promise<Array<object>>}
+ */
+export async function getTrackPoints(trackId) {
+  return db.track_points.where('track_id').equals(trackId).sortBy('idx');
+}
+
+/**
+ * Count points for a track.
+ * @param {string} trackId
+ * @returns {Promise<number>}
+ */
+export async function getTrackPointCount(trackId) {
+  return db.track_points.where('track_id').equals(trackId).count();
+}
+
+/**
+ * Mark any tracks left in 'recording' status (from a crash/reload) as 'interrupted'.
+ * @returns {Promise<Array<object>>} interrupted tracks
+ */
+export async function markInterruptedTracks() {
+  const stale = await db.tracks.where('status').equals('recording').toArray();
+  const updated = [];
+  for (const t of stale) {
+    updated.push(
+      await updateTrack(t.id, {
+        status:   'interrupted',
+        ended_at: t.ended_at || nowIso(),
+      })
+    );
+  }
+  return updated;
 }

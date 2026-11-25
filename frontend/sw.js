@@ -11,7 +11,7 @@
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 // Bump CACHE_VERSION to force a full cache refresh on next deploy.
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const CACHE_STATIC  = `fieldsync-static-${CACHE_VERSION}`;
 
 // ─── App shell to precache ────────────────────────────────────────────────────
