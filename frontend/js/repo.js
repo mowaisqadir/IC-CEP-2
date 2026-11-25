@@ -144,38 +144,43 @@ export async function createRecord(projectId, type, data) {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     let lastHlc = initialHlc;
 
-    const userRow   = await db.meta.get('user');
-    const createdBy = userRow?.value?.id ?? 'unknown';
-    const createdAt = nowIso();
-    const id        = uuid();
+    const userRow     = await db.meta.get('user');
+    const createdBy   = userRow?.value?.id ?? 'unknown';
+    const displayName = userRow?.value?.display_name || userRow?.value?.username || '';
+    const createdAt   = nowIso();
+    const id          = uuid();
 
-    const cleanData = {};
-    const fv        = {};
-    const fields    = {};
+    const cleanData    = {};
+    const fv           = {};
+    const fields       = {};
+    const fieldAuthors = {};
 
     for (const [k, v] of Object.entries(data || {})) {
       if (v === undefined) continue;
-      lastHlc      = hlcNow(lastHlc, deviceId);
-      cleanData[k] = v;
-      fv[k]        = lastHlc;
-      fields[k]    = { v, hlc: lastHlc };
+      lastHlc         = hlcNow(lastHlc, deviceId);
+      cleanData[k]    = v;
+      fv[k]           = lastHlc;
+      fields[k]       = { v, hlc: lastHlc };
+      fieldAuthors[k] = { user_id: createdBy, display_name: displayName, hlc: lastHlc };
     }
 
     // Track deleted state in fv per PROJECT_CONTEXT.md §2.4
-    lastHlc        = hlcNow(lastHlc, deviceId);
-    fv.deleted     = lastHlc;
-    fields.deleted = { v: false, hlc: lastHlc };
+    lastHlc              = hlcNow(lastHlc, deviceId);
+    fv.deleted           = lastHlc;
+    fields.deleted       = { v: false, hlc: lastHlc };
+    fieldAuthors.deleted = { user_id: createdBy, display_name: displayName, hlc: lastHlc };
 
     const record = {
       id,
-      project_id:  projectId,
+      project_id:    projectId,
       type,
-      data:        cleanData,
+      data:          cleanData,
       fv,
-      created_by:  createdBy,
-      created_at:  createdAt,
-      deleted:     false,
-      deleted_hlc: null,
+      field_authors: fieldAuthors,
+      created_by:    createdBy,
+      created_at:    createdAt,
+      deleted:       false,
+      deleted_hlc:   null,
     };
 
     await db.records.add(record);
@@ -204,19 +209,25 @@ export async function updateRecord(id, patch) {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     let lastHlc = initialHlc;
 
-    const nextData      = { ...(record.data || {}) };
-    const nextFv        = { ...(record.fv || {}) };
-    const changedFields = {};
+    const userRow     = await db.meta.get('user');
+    const userId      = userRow?.value?.id ?? 'unknown';
+    const displayName = userRow?.value?.display_name || userRow?.value?.username || '';
+
+    const nextData         = { ...(record.data || {}) };
+    const nextFv           = { ...(record.fv || {}) };
+    const nextFieldAuthors = { ...(record.field_authors || {}) };
+    const changedFields    = {};
 
     for (const [k, v] of Object.entries(patch || {})) {
       const normalized = v === undefined ? null : v;
       const prev       = nextData[k] === undefined ? null : nextData[k];
       if (_valuesEqual(prev, normalized)) continue;
 
-      lastHlc          = hlcNow(lastHlc, deviceId);
-      nextData[k]      = normalized;
-      nextFv[k]        = lastHlc;
-      changedFields[k] = { v: normalized, hlc: lastHlc };
+      lastHlc             = hlcNow(lastHlc, deviceId);
+      nextData[k]         = normalized;
+      nextFv[k]           = lastHlc;
+      nextFieldAuthors[k] = { user_id: userId, display_name: displayName, hlc: lastHlc };
+      changedFields[k]    = { v: normalized, hlc: lastHlc };
     }
 
     if (Object.keys(changedFields).length === 0) {
@@ -225,8 +236,9 @@ export async function updateRecord(id, patch) {
 
     const updated = {
       ...record,
-      data: nextData,
-      fv:   nextFv,
+      data:          nextData,
+      fv:            nextFv,
+      field_authors: nextFieldAuthors,
     };
 
     await db.records.put(updated);
@@ -253,11 +265,19 @@ export async function deleteRecord(id) {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     const lastHlc = hlcNow(initialHlc, deviceId);
 
+    const userRow     = await db.meta.get('user');
+    const userId      = userRow?.value?.id ?? 'unknown';
+    const displayName = userRow?.value?.display_name || userRow?.value?.username || '';
+
     const updated = {
       ...record,
-      deleted:     true,
-      deleted_hlc: lastHlc,
-      fv:          { ...(record.fv || {}), deleted: lastHlc },
+      deleted:       true,
+      deleted_hlc:   lastHlc,
+      fv:            { ...(record.fv || {}), deleted: lastHlc },
+      field_authors: {
+        ...(record.field_authors || {}),
+        deleted: { user_id: userId, display_name: displayName, hlc: lastHlc },
+      },
     };
 
     await db.records.put(updated);
@@ -284,11 +304,19 @@ export async function restoreRecord(id) {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     const lastHlc = hlcNow(initialHlc, deviceId);
 
+    const userRow     = await db.meta.get('user');
+    const userId      = userRow?.value?.id ?? 'unknown';
+    const displayName = userRow?.value?.display_name || userRow?.value?.username || '';
+
     const updated = {
       ...record,
-      deleted:     false,
-      deleted_hlc: null,
-      fv:          { ...(record.fv || {}), deleted: lastHlc },
+      deleted:       false,
+      deleted_hlc:   null,
+      fv:            { ...(record.fv || {}), deleted: lastHlc },
+      field_authors: {
+        ...(record.field_authors || {}),
+        deleted: { user_id: userId, display_name: displayName, hlc: lastHlc },
+      },
     };
 
     await db.records.put(updated);
@@ -312,16 +340,18 @@ export async function restoreRecord(id) {
  * @returns {Promise<Array<object>>}
  */
 export async function listRecords(projectId, filters = {}) {
-  const { type, search, includeDeleted = false } = filters;
+  const { type, search, includeDeleted = false, showDeleted = false } = filters;
 
   let rows;
-  if (type && type !== 'all') {
+  if (type && type !== 'all' && type !== 'deleted') {
     rows = await db.records.where('[project_id+type]').equals([projectId, type]).toArray();
   } else {
     rows = await db.records.where('project_id').equals(projectId).toArray();
   }
 
-  if (!includeDeleted) {
+  if (showDeleted) {
+    rows = rows.filter((r) => Boolean(r.deleted));
+  } else if (!includeDeleted) {
     rows = rows.filter((r) => !r.deleted);
   }
 
@@ -538,4 +568,100 @@ export async function markInterruptedTracks() {
     );
   }
   return updated;
+}
+
+// ─── Conflict helpers ─────────────────────────────────────────────────────────
+
+/**
+ * List conflicts, optionally filtered to unseen only.
+ * @param {{ onlyUnseen?: boolean }} [opts]
+ * @returns {Promise<Array<object>>}
+ */
+export async function listConflicts({ onlyUnseen = false } = {}) {
+  const all = await db.conflicts.orderBy('id').toArray();
+  return onlyUnseen ? all.filter((c) => !c.seen) : all;
+}
+
+/**
+ * Count unseen conflicts.
+ * @returns {Promise<number>}
+ */
+export async function countUnseenConflicts() {
+  const all = await db.conflicts.toArray();
+  return all.filter((c) => !c.seen).length;
+}
+
+/**
+ * Mark a single conflict as seen.
+ * @param {number} id
+ */
+export async function markConflictSeen(id) {
+  await db.conflicts.update(id, { seen: 1 });
+}
+
+/**
+ * Mark all unseen conflicts as seen.
+ */
+export async function dismissAllConflicts() {
+  const all = await db.conflicts.toArray();
+  for (const c of all) {
+    if (!c.seen) {
+      await db.conflicts.update(c.id, { seen: 1 });
+    }
+  }
+}
+
+// ─── Record last-seen tracking ────────────────────────────────────────────────
+
+/**
+ * Record that the current user just opened a record detail page.
+ * Stores ISO timestamp in meta key 'record_seen' as { [recordId]: isoString }.
+ * @param {string} recordId
+ */
+export async function markRecordSeen(recordId) {
+  const row = await db.meta.get('record_seen');
+  const map = { ...(row?.value || {}) };
+  map[recordId] = nowIso();
+  await db.meta.put({ key: 'record_seen', value: map });
+}
+
+/**
+ * Get the map of recordId -> ISO last-seen timestamp.
+ * @returns {Promise<Record<string, string>>}
+ */
+export async function getRecordSeenMap() {
+  const row = await db.meta.get('record_seen');
+  return row?.value ?? {};
+}
+
+/**
+ * Return true if the record has changes from a teammate since the user last opened it.
+ * @param {object}        record
+ * @param {string | null} lastSeenIso
+ * @param {string | null} currentUserId
+ * @returns {boolean}
+ */
+export function isRecordChangedByTeammate(record, lastSeenIso, currentUserId) {
+  const fa = record.field_authors || {};
+  if (!lastSeenIso) {
+    if (record.created_by && currentUserId && record.created_by !== currentUserId) {
+      return true;
+    }
+    for (const author of Object.values(fa)) {
+      if (author && author.user_id && author.user_id !== currentUserId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const seenMs = new Date(lastSeenIso).getTime();
+  for (const author of Object.values(fa)) {
+    if (!author || author.user_id === currentUserId) continue;
+    const hlcMs = parseInt(String(author.hlc || '').slice(0, 13), 10);
+    if (Number.isFinite(hlcMs) && hlcMs > seenMs) {
+      return true;
+    }
+  }
+  return false;
 }

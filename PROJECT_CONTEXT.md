@@ -71,6 +71,7 @@ The core observation entity.
 | `created_at`  | string                          | ISO 8601 UTC                                                                               |
 | `deleted`     | boolean                         | soft-delete flag                                                                           |
 | `deleted_hlc` | string \| null                  | HLC of the deletion event; edits with a **greater** HLC revive the record                 |
+| `field_authors`| `{field: {user_id, display_name, hlc}}` \| null | nullable per-field edit attribution map (derived on server push, synced in pull; old records default to `{}`) |
 
 **Common optional `data` fields** (all record types must accept them):
 
@@ -203,15 +204,15 @@ Implemented in `frontend/js/merge.js` and `backend/app/merge.py` (identical logi
 
 ---
 
-## 5. DEXIE SCHEMA v1
+## 5. DEXIE SCHEMA v2
 
 ```js
 // frontend/js/db.js
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const SCHEMA = {
   projects:     'id, name',
   records:      'id, project_id, type, [project_id+type], deleted',
-  media:        'id, record_id, project_id, upload_state',
+  media:        'id, record_id, project_id, upload_state, [record_id+upload_state]',
   tracks:       'id, project_id, status',
   track_points: '[track_id+idx], track_id, synced',
   outbox:       '++seq, change_id, entity',
@@ -229,6 +230,7 @@ const SCHEMA = {
 | `last_pull_seq` | Server sequence number after the last successful pull |
 | `token`         | JWT auth token                                        |
 | `user`          | Serialised `user` object of the logged-in researcher  |
+| `record_seen`   | Map `{ [recordId]: isoTimestamp }` of last-opened times per record |
 
 ---
 
@@ -458,5 +460,24 @@ IC-CEP-2/
 
 ---
 
-*Last updated: Phase 3 — Sync backend*
+---
+
+## 10. MANUAL TWO-DEVICE MULTI-USER SCENARIO
+
+1. **Setup:** Sign in on Device A (e.g. `researcher1`, normal browser window) and Device B (e.g. `researcher2`, incognito/second browser) to the same project.
+2. **Baseline:** Device A creates a `soil` record (e.g. `Site Name: Plot A-1`, `Soil pH: 6.5`, `Field Notes: Initial`). Wait for sync; Device B syncs and sees the record.
+3. **Go offline:** Toggle **Offline** in DevTools Network tab on both Device A and Device B.
+4. **Concurrent edits:**
+   - On **Device A** (earlier): edit `Soil pH` to `6.9` and `Field Notes` to `Dry topsoil (A)`. Save.
+   - On **Device B** (later): edit `Moisture` to `42.0` and `Field Notes` to `Wet subsoil (B)`. Save.
+5. **Reconnect both:** Restore network on Device A and Device B (or click **Sync now** in Settings).
+6. **Expected result:**
+   - **Identical final state** on both devices: `Soil pH = 6.9`, `Moisture = 42.0`, `Field Notes = Wet subsoil (B)`.
+   - **Per-field attribution** in record detail shows `Soil pH` last edited by Researcher 1 and `Moisture` / `Field Notes` last edited by Researcher 2.
+   - **Conflict awareness on the loser (Device A):** Header shows `1 change from teammates overwrote yours`; clicking it opens `#/conflicts` showing `Field Notes` with `Your value: Dry topsoil (A)` vs `Current value (by Researcher 2, <time>): Wet subsoil (B)` and actions **Keep current** / **Use mine** / **Dismiss all**.
+   - **Teammate highlight:** On the record list, the record displays a blue dot until opened.
+
+---
+
+*Last updated: Phase 5 — Multi-user experience*
 

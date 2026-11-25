@@ -4,6 +4,7 @@
 
 import { db, getMeta, setMeta } from './db.js';
 import { notifyWrite }            from './repo.js';
+import { apiGetMediaThumb, apiGetMediaFull } from './api.js';
 import { uuid, nowIso }          from './utils.js';
 
 export const MAX_IMAGE_EDGE = 1600;
@@ -252,6 +253,73 @@ export async function listMediaForRecord(recordId) {
  */
 export async function softDeleteMedia(mediaId) {
   await db.media.update(mediaId, { deleted: true });
+}
+
+/**
+ * Download thumbnail for a 'remote' media row (upload_state='remote', thumb_blob=null).
+ * Online-only. Stores thumb_blob in Dexie.
+ * @param {string} mediaId
+ * @returns {Promise<Blob|null>}
+ */
+export async function fetchAndStoreThumb(mediaId) {
+  if (!navigator.onLine) return null;
+  try {
+    const blob = await apiGetMediaThumb(mediaId);
+    await db.media.update(mediaId, { thumb_blob: blob });
+    return blob;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Download full-resolution image for a 'remote' media row.
+ * Online-only. Stores blob in Dexie.
+ * @param {string} mediaId
+ * @returns {Promise<Blob|null>}
+ */
+export async function fetchAndStoreFull(mediaId) {
+  if (!navigator.onLine) return null;
+  try {
+    const blob = await apiGetMediaFull(mediaId);
+    await db.media.update(mediaId, { blob });
+    return blob;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Prefetch all missing thumbnails for a project (for offline use).
+ * Respects the storage quota check from Phase 4.
+ * @param {string} projectId
+ * @param {(done: number, total: number) => void} [onProgress]
+ * @returns {Promise<{ done: number, failed: number, total: number }>}
+ */
+export async function prefetchProjectThumbs(projectId, onProgress) {
+  await assertSufficientStorage();
+
+  const all = await db.media.where('project_id').equals(projectId).toArray();
+  const needsThumb = all.filter(
+    (m) => !m.deleted && m.upload_state === 'remote' && !m.thumb_blob
+  );
+
+  const total = needsThumb.length;
+  if (onProgress) onProgress(0, total);
+  if (total === 0) return { done: 0, failed: 0, total: 0 };
+
+  let done = 0;
+  let failed = 0;
+
+  for (const m of needsThumb) {
+    await assertSufficientStorage();
+    const result = await fetchAndStoreThumb(m.id);
+    if (result) done += 1;
+    else failed += 1;
+    if (onProgress) onProgress(done + failed, total);
+  }
+
+  return { done, failed, total };
 }
 
 /**

@@ -10,9 +10,10 @@ import { projectsView }   from './ui/projects.js';
 import { recordsView }    from './ui/records.js';
 import { recordFormView, recordDetailView } from './ui/recordForm.js';
 import { tracksView, trackDetailView }      from './ui/tracks.js';
+import { conflictsView, updateConflictsBadge } from './ui/conflicts.js';
 import { settingsView }   from './ui/settings.js';
 import { markInterruptedTracks, setWriteHook } from './repo.js';
-import { initSync, triggerSync } from './sync.js';
+import { initSync, triggerSync, on as syncOn } from './sync.js';
 
 // ─── Placeholder stubs for routes not yet built (Phase 1) ────────────────────
 // These will be replaced in later phases with real view modules.
@@ -142,6 +143,7 @@ async function main() {
   // 3b. Initialise sync engine (triggers, badge, background sync)
   //     Must come after initAuth() so the token is hydrated.
   setWriteHook(triggerSync);
+  syncOn('pull', () => updateConflictsBadge());
   initSync();
 
   // 4. Configure routes
@@ -181,6 +183,7 @@ async function main() {
     }))
     .on('#/p/:projectId/tracks',      guarded(tracksView))
     .on('#/t/:trackId',               guarded(trackDetailView))
+    .on('#/conflicts',                guarded(conflictsView))
     .on('#/settings',                 guarded(settingsView))
 
     .notFound(async (_p, container) => {

@@ -235,6 +235,45 @@ export function apiPutMedia(id, blob, headers = {}) {
   return apiPutRaw(`/media/${id}`, blob, headers);
 }
 
+/**
+ * Internal binary GET helper for media endpoints.
+ * @param {string} path
+ * @returns {Promise<Blob>}
+ */
+async function apiGetBlob(path) {
+  const url = `${BASE_URL}${path}`;
+  const headers = new Headers();
+  const token = getToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  let response;
+  try {
+    response = await fetch(url, { method: 'GET', headers });
+  } catch (err) {
+    throw new NetworkError(err.message || 'Network request failed');
+  }
+
+  if (response.status === 401) {
+    throw new AuthError();
+  }
+  if (!response.ok) {
+    throw new HttpError(response.status, `HTTP ${response.status}`);
+  }
+  return response.blob();
+}
+
+/** GET /api/media/:id/thumb (raw binary) */
+export function apiGetMediaThumb(id) {
+  return apiGetBlob(`/media/${encodeURIComponent(id)}/thumb`);
+}
+
+/** GET /api/media/:id (raw binary, full resolution) */
+export function apiGetMediaFull(id) {
+  return apiGetBlob(`/media/${encodeURIComponent(id)}`);
+}
+
 /** POST /api/tracks/:id/points */
 export function apiPostTrackPoints(trackId, points) {
   return apiPost(`/tracks/${trackId}/points`, { points });

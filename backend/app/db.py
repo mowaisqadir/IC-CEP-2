@@ -51,6 +51,13 @@ def init_db(path: Path | None = None) -> None:
         }
         if "fv" not in track_cols:
             conn.execute("ALTER TABLE tracks ADD COLUMN fv TEXT NOT NULL DEFAULT '{}';")
+        # Phase 5 migration: field_authors column for edit attribution
+        record_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(records);").fetchall()
+        }
+        if "field_authors" not in record_cols:
+            conn.execute("ALTER TABLE records ADD COLUMN field_authors TEXT;")
         conn.commit()
     finally:
         conn.close()

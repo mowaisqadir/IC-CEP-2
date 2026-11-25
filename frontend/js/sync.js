@@ -358,15 +358,16 @@ async function _applyRecordChange(change, deviceId, lastHlc) {
   if (!local) {
     // Brand-new record from server — insert directly
     await db.records.put({
-      id:          incoming.id,
-      project_id:  incoming.project_id,
-      type:        incoming.type,
-      data:        { ...serverData },
-      fv:          { ...serverFv },
-      created_by:  incoming.created_by,
-      created_at:  incoming.created_at,
-      deleted:     Boolean(incoming.deleted),
-      deleted_hlc: incoming.deleted_hlc ?? null,
+      id:            incoming.id,
+      project_id:    incoming.project_id,
+      type:          incoming.type,
+      data:          { ...serverData },
+      fv:            { ...serverFv },
+      field_authors: incoming.field_authors ? { ...incoming.field_authors } : {},
+      created_by:    incoming.created_by,
+      created_at:    incoming.created_at,
+      deleted:       Boolean(incoming.deleted),
+      deleted_hlc:   incoming.deleted_hlc ?? null,
     });
     return currentHlc;
   }
@@ -394,14 +395,22 @@ async function _applyRecordChange(change, deviceId, lastHlc) {
       for (const ow of merged.overwritten) {
         if (!(ow.field in updatedFields)) continue;
 
+        const remoteAuthor = incoming.field_authors?.[ow.field];
+        const remoteHlc = incomingFields[ow.field]?.hlc || '';
+        const hlcMs = parseInt(remoteHlc.slice(0, 13), 10);
+        const editTime = Number.isFinite(hlcMs) && hlcMs > 0
+          ? new Date(hlcMs).toISOString()
+          : nowIso();
+
         await db.conflicts.add({
-          record_id:   change.entity_id,
-          field:       ow.field,
-          localValue:  ow.localValue,
-          remoteValue: ow.remoteValue,
-          remote_user: incoming.created_by ?? null,
-          at:          nowIso(),
-          seen:        false,
+          record_id:           change.entity_id,
+          field:               ow.field,
+          localValue:          ow.localValue,
+          remoteValue:         ow.remoteValue,
+          remote_user:         remoteAuthor?.user_id ?? incoming.created_by ?? null,
+          remote_user_display: remoteAuthor?.display_name ?? null,
+          at:                  editTime,
+          seen:                0,
         });
 
         // Prune the losing field from the outbox so we never re-push it
@@ -419,13 +428,23 @@ async function _applyRecordChange(change, deviceId, lastHlc) {
     }
   }
 
+  // Merge field_authors: for each field in merged.fv, pick incoming author if incoming HLC won
+  const mergedAuthors = { ...(local.field_authors || {}) };
+  const incomingAuthors = incoming.field_authors || {};
+  for (const [field, hlc] of Object.entries(merged.fv)) {
+    if (incomingAuthors[field] && incomingAuthors[field].hlc === hlc) {
+      mergedAuthors[field] = incomingAuthors[field];
+    }
+  }
+
   // Write merged record
   await db.records.put({
     ...local,
-    data:        merged.data,
-    fv:          merged.fv,
-    deleted:     merged.deleted,
-    deleted_hlc: merged.deleted_hlc,
+    data:          merged.data,
+    fv:            merged.fv,
+    field_authors: mergedAuthors,
+    deleted:       merged.deleted,
+    deleted_hlc:   merged.deleted_hlc,
   });
 
   return currentHlc;
@@ -719,6 +738,8 @@ async function _doSync() {
 
     // ── 2. PULL ──────────────────────────────────────────────────────────
     await _pull(deviceId, lastHlcStored);
+    _emit('pull', null);
+    _updateConflictsBadge();
 
     // ── 3. MEDIA UPLOAD ──────────────────────────────────────────────────
     await _uploadMedia();
@@ -824,6 +845,23 @@ function _updateHeaderBadge() {
   badge.title = (status === 'error' && lastError) ? lastError : '';
 }
 
+async function _updateConflictsBadge() {
+  try {
+    const all = await db.conflicts.toArray();
+    const count = all.filter((c) => !c.seen).length;
+    const nav = document.getElementById('conflicts-nav');
+    const textEl = document.getElementById('conflicts-badge-text');
+    if (!nav || !textEl) return;
+    nav.hidden = count === 0;
+    if (count > 0) {
+      const label = `${count} change${count === 1 ? '' : 's'} from teammates overwrote yours`;
+      textEl.textContent = label;
+      nav.setAttribute('aria-label', label);
+      nav.title = label;
+    }
+  } catch { /* ignore */ }
+}
+
 function _formatRelativeTime(isoString) {
   if (!isoString) return '';
   try {
@@ -886,6 +924,7 @@ export function initSync() {
       }
     })
     .catch(() => {});
+  _updateConflictsBadge();
 
   // Badge click → go to settings
   const badge = document.getElementById('sync-badge');

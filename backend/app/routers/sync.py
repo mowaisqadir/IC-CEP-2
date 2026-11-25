@@ -100,12 +100,13 @@ def _apply_record_change(
     change: PushChange,
     incoming_fields: dict[str, dict[str, Any]],
     user_id: str,
+    display_name: str = "",
 ) -> str | None:
     """Apply a record change inside an open transaction. Returns rejection reason or None."""
     row = db.execute(
         """
         SELECT id, project_id, type, data, fv, created_by, created_at,
-               deleted, deleted_hlc, server_seq
+               deleted, deleted_hlc, server_seq, field_authors
         FROM   records
         WHERE  id = ?
         """,
@@ -116,18 +117,34 @@ def _apply_record_change(
         if row["project_id"] != change.project_id:
             return "project_mismatch"
 
+        existing_fv = json.loads(row["fv"])
         merged = merge_fields(
             json.loads(row["data"]),
-            json.loads(row["fv"]),
+            existing_fv,
             incoming_fields,
             bool(row["deleted"]),
         )
         if merged["changed"]:
+            # Build updated field_authors: for each winning field, record the author
+            existing_fa: dict[str, Any] = json.loads(row["field_authors"] or "{}")
+            for field, f_incoming in incoming_fields.items():
+                local_hlc = existing_fv.get(field)
+                wins = local_hlc is None or (
+                    merged["fv"].get(field) == f_incoming["hlc"]
+                )
+                if wins:
+                    existing_fa[field] = {
+                        "user_id": user_id,
+                        "display_name": display_name,
+                        "hlc": f_incoming["hlc"],
+                    }
+
             seq = next_seq(db)
             db.execute(
                 """
                 UPDATE records
-                SET    data = ?, fv = ?, deleted = ?, deleted_hlc = ?, server_seq = ?
+                SET    data = ?, fv = ?, deleted = ?, deleted_hlc = ?,
+                       server_seq = ?, field_authors = ?
                 WHERE  id = ?
                 """,
                 (
@@ -136,6 +153,7 @@ def _apply_record_change(
                     int(merged["deleted"]),
                     merged["deleted_hlc"],
                     seq,
+                    json.dumps(existing_fa),
                     change.entity_id,
                 ),
             )
@@ -150,12 +168,21 @@ def _apply_record_change(
     merged = merge_fields({}, {}, incoming_fields, False)
     seq = next_seq(db)
 
+    # Build field_authors for brand-new record
+    new_fa: dict[str, Any] = {}
+    for field, f_incoming in incoming_fields.items():
+        new_fa[field] = {
+            "user_id": user_id,
+            "display_name": display_name,
+            "hlc": f_incoming["hlc"],
+        }
+
     db.execute(
         """
         INSERT INTO records
             (id, project_id, type, data, fv, created_by, created_at,
-             deleted, deleted_hlc, server_seq)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             deleted, deleted_hlc, server_seq, field_authors)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             change.entity_id,
@@ -168,6 +195,7 @@ def _apply_record_change(
             int(merged["deleted"]),
             merged["deleted_hlc"],
             seq,
+            json.dumps(new_fa),
         ),
     )
     return None
@@ -270,6 +298,12 @@ def sync_push(
     user_projects = _get_user_project_ids(db, user_id)
     server_now_ms = int(time.time() * 1000)
 
+    # Look up display_name once for field_authors attribution
+    user_row = db.execute(
+        "SELECT display_name FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    display_name: str = user_row["display_name"] if user_row else ""
+
     applied: list[str] = []
     rejected: list[RejectedChange] = []
 
@@ -306,7 +340,7 @@ def sync_push(
                 continue
 
             if change.entity == "record":
-                err = _apply_record_change(db, change, incoming_fields, user_id)
+                err = _apply_record_change(db, change, incoming_fields, user_id, display_name)
             else:
                 err = _apply_track_change(db, change, incoming_fields, user_id)
 
@@ -387,7 +421,7 @@ def sync_pull(
         for row in db.execute(
             f"""
             SELECT id, project_id, type, data, fv, created_by, created_at,
-                   deleted, deleted_hlc, server_seq
+                   deleted, deleted_hlc, server_seq, field_authors
             FROM   records
             WHERE  id IN ({placeholders})
             """,
@@ -404,6 +438,7 @@ def sync_pull(
                 "deleted": bool(row["deleted"]),
                 "deleted_hlc": row["deleted_hlc"],
                 "server_seq": row["server_seq"],
+                "field_authors": json.loads(row["field_authors"]) if row["field_authors"] else {},
             }
 
     tracks_by_id: dict[str, dict[str, Any]] = {}

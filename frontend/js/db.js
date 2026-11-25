@@ -6,9 +6,9 @@
 import { uuid } from './utils.js';
 
 const DB_NAME    = 'fieldsync';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
-const SCHEMA = {
+const SCHEMA_V1 = {
   projects:     'id, name',
   records:      'id, project_id, type, [project_id+type], deleted',
   media:        'id, record_id, project_id, upload_state',
@@ -19,9 +19,15 @@ const SCHEMA = {
   meta:         'key',
 };
 
+const SCHEMA_V2 = {
+  ...SCHEMA_V1,
+  media:        'id, record_id, project_id, upload_state, [record_id+upload_state]',
+};
+
 // `Dexie` is a global injected by the CDN <script> in index.html.
 const db = new Dexie(DB_NAME);
-db.version(DB_VERSION).stores(SCHEMA);
+db.version(1).stores(SCHEMA_V1);
+db.version(DB_VERSION).stores(SCHEMA_V2);
 
 // Ensure a persistent device_id exists in meta on first run.
 // Use the `vipDb` argument provided by Dexie's `ready` hook to avoid

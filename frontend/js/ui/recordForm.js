@@ -10,6 +10,7 @@ import {
   restoreRecord,
   getRecord,
   getPendingRecordIds,
+  markRecordSeen,
 } from '../repo.js';
 import {
   RECORD_TYPES,
@@ -26,6 +27,8 @@ import {
   softDeleteMedia,
   assertSufficientStorage,
   formatBytes,
+  fetchAndStoreThumb,
+  fetchAndStoreFull,
 } from '../media.js';
 import { router } from '../router.js';
 
@@ -281,6 +284,9 @@ export async function recordDetailView(params, container) {
     return;
   }
 
+  // Mark record as seen so the teammate-change blue dot clears
+  markRecordSeen(recordId).catch(() => {});
+
   const meta      = getTypeMeta(record.type);
   const schema    = getSchema(record.type);
   const isPending = pendingIds.has(record.id);
@@ -323,6 +329,9 @@ export async function recordDetailView(params, container) {
   const dl = document.createElement('dl');
   dl.className = 'detail-list';
 
+  const fieldAuthors = record.field_authors || {};
+  const fieldFv      = record.fv || {};
+
   for (const field of schema) {
     const val = record.data?.[field.key];
     const hasVal = val !== undefined && val !== null && val !== '';
@@ -336,6 +345,25 @@ export async function recordDetailView(params, container) {
       <dt class="detail-list__label">${escapeHtml(field.label)}</dt>
       <dd class="detail-list__value">${escapeHtml(String(displayVal))}</dd>
     `;
+
+    const author  = fieldAuthors[field.key];
+    const hlcStr  = author?.hlc || fieldFv[field.key];
+    if (hlcStr) {
+      const hlcMs   = parseInt(String(hlcStr).slice(0, 13), 10);
+      const timeStr = Number.isFinite(hlcMs) && hlcMs > 0
+        ? formatDate(new Date(hlcMs).toISOString())
+        : null;
+      const authorName = author?.display_name || author?.user_id;
+      if (timeStr) {
+        const hint = document.createElement('div');
+        hint.className = 'field-author-hint text-xs text-muted';
+        hint.textContent = authorName
+          ? `Last edited by ${authorName} at ${timeStr}`
+          : `Last edited at ${timeStr}`;
+        row.appendChild(hint);
+      }
+    }
+
     dl.appendChild(row);
   }
   card.appendChild(dl);
@@ -639,19 +667,35 @@ function _buildPhotoSection({ recordId, stagedFiles = null, activeUrls }) {
         return;
       }
       for (const item of items) {
-        const thumbSrc = item.thumb_blob || item.blob;
-        const url = URL.createObjectURL(thumbSrc);
-        localThumbUrls.add(url);
-        activeUrls.add(url);
+        // Lazy thumbnail download for remote media when online
+        if (item.upload_state === 'remote' && !item.thumb_blob && !item.blob && navigator.onLine) {
+          const downloadedThumb = await fetchAndStoreThumb(item.id);
+          if (downloadedThumb) {
+            item.thumb_blob = downloadedThumb;
+          }
+        }
 
+        const thumbSrc = item.thumb_blob || item.blob;
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'photo-thumb-btn';
         btn.setAttribute('aria-label', 'View photo');
-        btn.innerHTML = `
-          <img src="${url}" alt="Field observation photo" />
-          <span class="photo-thumb-badge">${item.upload_state === 'done' ? '✓' : '⏳'}</span>
-        `;
+
+        if (thumbSrc) {
+          const url = URL.createObjectURL(thumbSrc);
+          localThumbUrls.add(url);
+          activeUrls.add(url);
+          btn.innerHTML = `
+            <img src="${url}" alt="Field observation photo" />
+            <span class="photo-thumb-badge">${item.upload_state === 'done' || item.upload_state === 'remote' ? '✓' : '⏳'}</span>
+          `;
+        } else {
+          btn.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:1.5rem;background:var(--color-border)" aria-hidden="true">📷</div>
+            <span class="photo-thumb-badge">☁️</span>
+          `;
+        }
+
         btn.addEventListener('click', () => {
           _openPhotoViewer(item, async () => {
             await softDeleteMedia(item.id);
@@ -731,7 +775,9 @@ function _buildPhotoSection({ recordId, stagedFiles = null, activeUrls }) {
 }
 
 function _openPhotoViewer(mediaItem, onDelete) {
-  const fullUrl = URL.createObjectURL(mediaItem.blob || mediaItem.thumb_blob);
+  let currentUrl = mediaItem.blob || mediaItem.thumb_blob
+    ? URL.createObjectURL(mediaItem.blob || mediaItem.thumb_blob)
+    : '';
 
   const overlay = document.createElement('div');
   overlay.className = 'photo-viewer';
@@ -741,12 +787,16 @@ function _openPhotoViewer(mediaItem, onDelete) {
 
   const dims = mediaItem.width && mediaItem.height ? `${mediaItem.width}×${mediaItem.height}` : '';
   const size = mediaItem.size ? formatBytes(mediaItem.size) : '';
+  const needsFullFetch = !mediaItem.blob && mediaItem.upload_state === 'remote';
+  const statusLabel = mediaItem.blob
+    ? (mediaItem.upload_state === 'done' || mediaItem.upload_state === 'remote' ? 'Available offline' : 'Pending upload')
+    : (navigator.onLine ? 'Loading full image…' : 'Thumbnail only (offline)');
 
   overlay.innerHTML = `
     <div class="photo-viewer__bar">
       <div class="text-xs">
         <div>${escapeHtml([dims, size].filter(Boolean).join(' · '))}</div>
-        <div style="opacity:0.75">${mediaItem.upload_state === 'done' ? 'Uploaded' : 'Pending upload'}</div>
+        <div id="pv-status" style="opacity:0.75">${escapeHtml(statusLabel)}</div>
       </div>
       <div class="row" style="gap:var(--space-2)">
         <button type="button" class="btn btn--danger" id="pv-delete">🗑️ Delete</button>
@@ -754,13 +804,15 @@ function _openPhotoViewer(mediaItem, onDelete) {
       </div>
     </div>
     <div class="photo-viewer__stage">
-      <img class="photo-viewer__img" src="${fullUrl}" alt="Full-size field photo" />
+      ${currentUrl
+        ? `<img class="photo-viewer__img" id="pv-img" src="${currentUrl}" alt="Full-size field photo" />`
+        : `<div id="pv-placeholder" class="text-sm" style="color:#fff">📷 Loading image…</div>`}
     </div>
   `;
 
   function close() {
     document.removeEventListener('keydown', onKeyDown);
-    URL.revokeObjectURL(fullUrl);
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
     overlay.remove();
   }
 
@@ -783,4 +835,29 @@ function _openPhotoViewer(mediaItem, onDelete) {
 
   document.addEventListener('keydown', onKeyDown);
   document.body.appendChild(overlay);
+
+  // Lazy-download full-resolution image only when the viewer is opened
+  if (needsFullFetch && navigator.onLine) {
+    fetchAndStoreFull(mediaItem.id).then((fullBlob) => {
+      if (!overlay.isConnected) return;
+      const statusEl = overlay.querySelector('#pv-status');
+      if (!fullBlob) {
+        if (statusEl) statusEl.textContent = 'Full image unavailable';
+        return;
+      }
+      mediaItem.blob = fullBlob;
+      const nextUrl = URL.createObjectURL(fullBlob);
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      currentUrl = nextUrl;
+
+      const stage = overlay.querySelector('.photo-viewer__stage');
+      let imgEl = overlay.querySelector('#pv-img');
+      if (!imgEl && stage) {
+        stage.innerHTML = `<img class="photo-viewer__img" id="pv-img" alt="Full-size field photo" />`;
+        imgEl = overlay.querySelector('#pv-img');
+      }
+      if (imgEl) imgEl.src = nextUrl;
+      if (statusEl) statusEl.textContent = 'Available offline';
+    });
+  }
 }
