@@ -44,6 +44,13 @@ def init_db(path: Path | None = None) -> None:
     try:
         # executescript commits any open transaction before running.
         conn.executescript(sql)
+        # Idempotent column migration for pre-existing databases.
+        track_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(tracks);").fetchall()
+        }
+        if "fv" not in track_cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN fv TEXT NOT NULL DEFAULT '{}';")
         conn.commit()
     finally:
         conn.close()

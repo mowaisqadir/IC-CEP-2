@@ -20,7 +20,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.db import init_db
 from app.routers import auth as auth_router
+from app.routers import media as media_router
 from app.routers import projects as projects_router
+from app.routers import sync as sync_router
+from app.routers import tracks as tracks_router
 
 # ---------------------------------------------------------------------------
 # Lifespan: initialise database on startup
@@ -52,6 +55,9 @@ app = FastAPI(
 
 app.include_router(auth_router.router,     prefix="/api")
 app.include_router(projects_router.router, prefix="/api")
+app.include_router(sync_router.router,     prefix="/api")
+app.include_router(media_router.router,    prefix="/api")
+app.include_router(tracks_router.router,   prefix="/api")
 
 
 # ---------------------------------------------------------------------------

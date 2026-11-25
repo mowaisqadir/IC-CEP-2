@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     ended_at    TEXT,                       -- ISO 8601 UTC (nullable)
     status      TEXT NOT NULL DEFAULT 'recording', -- 'recording'|'paused'|'stopped'
     created_by  TEXT NOT NULL REFERENCES users(id),
+    fv          TEXT NOT NULL DEFAULT '{}', -- JSON object: {field: hlc}
     server_seq  INTEGER                     -- set by next_seq() on every write
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_project_seq ON tracks(project_id, server_seq);
@@ -149,3 +150,11 @@ CREATE TABLE IF NOT EXISTS track_points (
     PRIMARY KEY (track_id, idx)
 );
 CREATE INDEX IF NOT EXISTS idx_track_points_track_id ON track_points(track_id);
+
+-- ------------------------------------------------------------
+-- processed_changes  (idempotency log for /api/sync/push)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS processed_changes (
+    change_id  TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL                -- ISO 8601 UTC
+);

@@ -125,7 +125,7 @@ A GPS track session.
 | `ended_at`   | string \| null              | ISO 8601 UTC       |
 | `status`     | `'recording'\|'paused'\|'stopped'\|'interrupted'` | `'interrupted'` set on reload if app closed while `'recording'` |
 | `created_by` | string                      | user UUID          |
-| `fv`         | `{field: hlc}`              | Dexie-only per-field HLC for metadata (`name`, `status`, `started_at`, `ended_at`) |
+| `fv`         | `{field: hlc}`              | per-field HLC for metadata (`name`, `status`, `started_at`, `ended_at`) |
 
 ### 2.7 `track_point`
 
@@ -313,7 +313,8 @@ GET /sync/pull?since=<int>&limit=200
 
 | Method | Path                  | Notes                                                                      |
 | ------ | --------------------- | -------------------------------------------------------------------------- |
-| PUT    | `/media/{id}`         | Raw bytes body. Headers: `X-Record-Id`, `X-Project-Id`, `X-Mime`, `X-Width`, `X-Height`. Idempotent. |
+| PUT    | `/media/{id}`         | Raw bytes body. Headers: `X-Record-Id`, `X-Project-Id`, `X-Mime`, `X-Width`, `X-Height`. Max 10 MB. Idempotent. |
+| PUT    | `/media/{id}/thumb`   | Raw bytes body for thumbnail. Idempotent.                                  |
 | GET    | `/media/{id}`         | Returns full-resolution binary with correct `Content-Type`.                |
 | GET    | `/media/{id}/thumb`   | Returns thumbnail binary.                                                  |
 
@@ -333,7 +334,13 @@ POST /tracks/{id}/points
 }
 ```
 
-Idempotent by `(track_id, idx)`.
+Idempotent by `(track_id, idx)`. Max 1000 points per request.
+
+```
+GET /tracks/{id}/points?from_idx=0
+```
+
+Returns `{ "track_id": "uuid", "points": [...] }` ordered by `idx` ascending.
 
 ### 6.7 Health
 
@@ -451,5 +458,5 @@ IC-CEP-2/
 
 ---
 
-*Last updated: Phase 2 — Photos & GPS (offline-only)*
+*Last updated: Phase 3 — Sync backend*
 
