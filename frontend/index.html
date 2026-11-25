@@ -1,7 +1,87 @@
 <!DOCTYPE html>
-<!-- frontend/index.html – single HTML shell; not yet implemented -->
 <html lang="en">
-<head><meta charset="UTF-8"><title>FieldSync</title></head>
-<body><!-- Phase 0 placeholder --></body>
-</html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#2d6a4f" />
+  <meta name="description" content="Offline-first PWA for environmental field researchers" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="FieldSync" />
 
+  <title>FieldSync</title>
+
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════
+       APP HEADER
+  ════════════════════════════════════════════════ -->
+  <header class="app-header" id="app-header" hidden>
+    <div class="app-header__inner">
+      <span class="app-header__logo" aria-hidden="true">🌿</span>
+      <span class="app-header__title">FieldSync</span>
+
+      <!-- Online / Offline pill -->
+      <span class="status-pill" id="online-pill" role="status" aria-live="polite">
+        <span class="status-pill__dot"></span>
+        <span class="status-pill__label" id="online-label">Online</span>
+      </span>
+
+      <!-- Sync badge placeholder (populated by sync.js in Phase 3) -->
+      <button class="sync-badge" id="sync-badge" aria-label="Sync status" hidden>
+        <span class="sync-badge__icon">↕</span>
+        <span class="sync-badge__count" id="sync-badge-count"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════
+       MAIN VIEW CONTAINER  (router renders here)
+  ════════════════════════════════════════════════ -->
+  <main id="view" class="view" role="main"></main>
+
+  <!-- ═══════════════════════════════════════════════
+       BOTTOM NAV (hidden on login screen)
+  ════════════════════════════════════════════════ -->
+  <nav class="bottom-nav" id="bottom-nav" hidden aria-label="Main navigation">
+    <a class="bottom-nav__item" href="#/projects" data-route="projects" aria-label="Projects">
+      <span class="bottom-nav__icon" aria-hidden="true">📁</span>
+      <span class="bottom-nav__label">Projects</span>
+    </a>
+    <a class="bottom-nav__item" href="#/records" data-route="records" aria-label="Records">
+      <span class="bottom-nav__icon" aria-hidden="true">📋</span>
+      <span class="bottom-nav__label">Records</span>
+    </a>
+    <a class="bottom-nav__item" href="#/tracks" data-route="tracks" aria-label="Tracks">
+      <span class="bottom-nav__icon" aria-hidden="true">📍</span>
+      <span class="bottom-nav__label">Tracks</span>
+    </a>
+    <a class="bottom-nav__item" href="#/settings" data-route="settings" aria-label="Settings">
+      <span class="bottom-nav__icon" aria-hidden="true">⚙️</span>
+      <span class="bottom-nav__label">Settings</span>
+    </a>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════════
+       TOAST CONTAINER  (injected by components.js)
+  ════════════════════════════════════════════════ -->
+  <div id="toast-container" class="toast-container" role="region" aria-live="polite" aria-label="Notifications"></div>
+
+  <!-- ═══════════════════════════════════════════════
+       SCRIPTS
+       1. Dexie from CDN  — plain <script>, no module,
+          so `Dexie` is available as a global before
+          any ES module runs.
+       2. app.js          — ES module entry point.
+  ════════════════════════════════════════════════ -->
+  <script src="https://cdn.jsdelivr.net/npm/dexie@4/dist/dexie.min.js"></script>
+  <script type="module" src="/js/app.js"></script>
+
+</body>
+</html>
