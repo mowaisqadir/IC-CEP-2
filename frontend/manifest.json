@@ -1,0 +1,11 @@
+{
+  "name": "FieldSync",
+  "short_name": "FieldSync",
+  "description": "Offline-first PWA for environmental field researchers",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2d6a4f",
+  "icons": []
+}
+
