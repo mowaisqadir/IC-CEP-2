@@ -8,7 +8,7 @@
 //                  Dexie meta table (db.meta.get('token')) without
 //                  changing any caller.
 
-import { getMeta, setMeta, deleteMeta } from './db.js';
+import { getMeta, setMeta, deleteMeta, isQuotaExceededError } from './db.js';
 
 // ─── Typed error classes ──────────────────────────────────────────────────────
 
@@ -72,6 +72,7 @@ export function getToken() {
 export function setToken(token) {
   _memToken = token;
   return setMeta('token', token).catch((err) => {
+    if (isQuotaExceededError(err)) throw err;
     console.warn('[api] Failed to persist token in meta:', err);
   });
 }

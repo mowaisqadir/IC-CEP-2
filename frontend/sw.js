@@ -11,42 +11,43 @@
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 // Bump CACHE_VERSION to force a full cache refresh on next deploy.
-const CACHE_VERSION = 'v6';
-const CACHE_STATIC  = `fieldsync-static-${CACHE_VERSION}`;
+const CACHE_VERSION = 'v9';
+const CACHE_STATIC = `fieldsync-static-${CACHE_VERSION}`;
 
-// ─── App shell to precache ────────────────────────────────────────────────────
+// ─── App shell to precache (managed by tools/build_precache.py) ──────────────
+// <PRECACHE_START>
 const APP_SHELL = [
   '/',
   '/index.html',
   '/manifest.json',
   '/css/styles.css',
-  '/js/app.js',
-  '/js/router.js',
-  '/js/db.js',
   '/js/api.js',
+  '/js/app.js',
   '/js/auth.js',
-  '/js/utils.js',
+  '/js/db.js',
+  '/js/gps.js',
   '/js/hlc.js',
+  '/js/media.js',
   '/js/merge.js',
   '/js/repo.js',
-  '/js/sync.js',
-  '/js/media.js',
-  '/js/gps.js',
+  '/js/router.js',
   '/js/schemas.js',
+  '/js/sync.js',
   '/js/ui/components.js',
+  '/js/ui/conflicts.js',
   '/js/ui/login.js',
   '/js/ui/projects.js',
-  '/js/ui/records.js',
   '/js/ui/recordForm.js',
-  '/js/ui/tracks.js',
-  '/js/ui/conflicts.js',
+  '/js/ui/records.js',
   '/js/ui/settings.js',
+  '/js/ui/tracks.js',
+  '/js/utils.js',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
   '/icons/icon-maskable-512.png',
-  // Dexie CDN — must be fetched with mode:'cors' so the response is cacheable
   'https://cdn.jsdelivr.net/npm/dexie@4/dist/dexie.min.js',
 ];
+// <PRECACHE_END>
 
 // ─── INSTALL ──────────────────────────────────────────────────────────────────
 self.addEventListener('install', (event) => {
@@ -58,9 +59,9 @@ self.addEventListener('install', (event) => {
       const results = await Promise.allSettled(
         APP_SHELL.map(async (url) => {
           const isCdn = url.startsWith('http');
-          const req   = isCdn
+          const req = isCdn
             ? new Request(url, { mode: 'cors', credentials: 'omit' })
-            : new Request(url);
+            : new Request(url, { cache: 'reload' });
 
           let res;
           try {
@@ -70,37 +71,21 @@ self.addEventListener('install', (event) => {
           }
 
           if (!res.ok) {
-            // 404s on stub files are acceptable during early phases —
-            // warn but do not abort install so development isn't blocked.
-            // Change the condition to `throw` once all files ship.
-            console.warn(`[SW] Cache warning: ${res.status} for ${url}`);
-            return;
+            throw new Error(`[SW] HTTP ${res.status} caching ${url}`);
           }
 
           await cache.put(req, res);
         })
       );
 
-      // Log any failures
-      results.forEach((r, i) => {
-        if (r.status === 'rejected') {
-          console.error(`[SW] Install failed for ${APP_SHELL[i]}:`, r.reason);
-        }
-      });
-
-      // If the CDN fetch itself was rejected (network down at install time),
-      // abort the install so the app doesn't run without Dexie.
-      const cdnIndex = APP_SHELL.indexOf(
-        'https://cdn.jsdelivr.net/npm/dexie@4/dist/dexie.min.js'
-      );
-      if (results[cdnIndex] && results[cdnIndex].status === 'rejected') {
-        throw new Error(
-          '[SW] FATAL: could not cache Dexie CDN. Install aborted. ' +
-          'Connect to the internet and reload.'
-        );
+      // Log any failures and abort install if any asset failed
+      const failures = results.filter((r) => r.status === 'rejected');
+      if (failures.length > 0) {
+        failures.forEach((f, idx) => console.error(`[SW] Install failure:`, f.reason));
+        throw failures[0].reason;
       }
 
-      console.log(`[SW] Install complete — cache ${CACHE_STATIC}`);
+      console.log(`[SW] Install complete — cache ${CACHE_STATIC} (${APP_SHELL.length} assets)`);
     })()
   );
 });
@@ -136,8 +121,11 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
+  // 1b. Ignore non-HTTP(S) schemes (e.g. chrome-extension://)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+
   // 2. Never intercept API calls — always go straight to the network
-  if (url.pathname.startsWith('/api/')) return;
+  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) return;
 
   // 3. Navigation requests (HTML pages) → Network-first, SPA fallback
   if (request.mode === 'navigate') {
@@ -176,17 +164,32 @@ async function _networkFirstNavigation(request) {
 
 // ─── Strategy: Cache-first with stale-while-revalidate ────────────────────────
 async function _cacheFirstWithRevalidation(request) {
-  const cache  = await caches.open(CACHE_STATIC);
+  const url = new URL(request.url);
+  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
+    return fetch(request);
+  }
+
+  const cache = await caches.open(CACHE_STATIC);
   const cached = await cache.match(request);
 
   // Kick off a background refresh regardless of cache hit
   const networkFetch = fetch(request).then((res) => {
-    if (res.ok) cache.put(request, res.clone());
+    if (res.ok && res.type !== 'opaque') {
+      cache.put(request, res.clone());
+    }
     return res;
   }).catch(() => null);  // silently ignore network errors during background update
 
   // Return cached immediately if available; otherwise wait for network
-  return cached || networkFetch;
+  if (cached) return cached;
+  const networkRes = await networkFetch;
+  if (networkRes) return networkRes;
+
+  return new Response('Offline — resource not cached.', {
+    status: 503,
+    statusText: 'Service Unavailable',
+    headers: { 'Content-Type': 'text/plain' },
+  });
 }
 
 // ─── MESSAGE ──────────────────────────────────────────────────────────────────

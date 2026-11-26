@@ -23,9 +23,15 @@ MEDIA_DIR: Path = Path(os.environ.get("FIELDSYNC_MEDIA_DIR", str(_DATA_DIR / "me
 # Lifetime in seconds (default 30 days)
 SESSION_LIFETIME_SECONDS: int = int(os.environ.get("FIELDSYNC_SESSION_LIFETIME", str(30 * 24 * 3600)))
 
-# --- Upload -----------------------------------------------------------------
+# --- Upload / Request limits ------------------------------------------------
 # Maximum raw-bytes upload size (default 10 MB)
 MAX_UPLOAD_BYTES: int = int(os.environ.get("FIELDSYNC_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+# Maximum JSON request body size for non-media API endpoints (default 5 MB)
+MAX_JSON_BODY_BYTES: int = int(os.environ.get("FIELDSYNC_MAX_JSON_BODY_BYTES", str(5 * 1024 * 1024)))
+
+# --- Rate limiting ----------------------------------------------------------
+LOGIN_RATE_LIMIT_MAX: int = int(os.environ.get("FIELDSYNC_LOGIN_RATE_LIMIT_MAX", "5"))
+LOGIN_RATE_LIMIT_WINDOW_S: int = int(os.environ.get("FIELDSYNC_LOGIN_RATE_LIMIT_WINDOW_S", "60"))
 
 # ---------------------------------------------------------------------------
 # Ensure data directories exist at import time so other modules can rely on

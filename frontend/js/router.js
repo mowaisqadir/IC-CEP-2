@@ -110,7 +110,9 @@ export const router = {
   // ─── Internal ───────────────────────────────────────────────────────────────
 
   async _dispatch() {
-    const hash = window.location.hash || '#/login';
+    const rawHash = window.location.hash || '#/login';
+    const qIdx    = rawHash.indexOf('?');
+    const hash    = qIdx === -1 ? rawHash : rawHash.slice(0, qIdx);
 
     // Run cleanup for the previous view
     if (typeof _currentCleanup === 'function') {

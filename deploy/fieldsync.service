@@ -1,0 +1,24 @@
+# deploy/fieldsync.service
+# Copy to /etc/systemd/system/fieldsync.service
+# Then run:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fieldsync
+
+[Unit]
+Description=FieldSync FastAPI Backend (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=fieldsync
+Group=fieldsync
+WorkingDirectory=/opt/fieldsync/backend
+Environment=FIELDSYNC_DB_PATH=/opt/fieldsync/data/fieldsync.db
+Environment=FIELDSYNC_MEDIA_DIR=/opt/fieldsync/data/media
+ExecStart=/opt/fieldsync/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

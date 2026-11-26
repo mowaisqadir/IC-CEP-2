@@ -2,7 +2,7 @@
 // Single data-access layer for IndexedDB (Dexie).
 // All UI modules read/write data exclusively through this module.
 
-import { db }            from './db.js';
+import { db, safeWrite } from './db.js';
 import { now as hlcNow } from './hlc.js';
 import { uuid, nowIso }  from './utils.js';
 
@@ -108,7 +108,7 @@ function _valuesEqual(a, b) {
  */
 export async function upsertProjects(projects) {
   if (!Array.isArray(projects) || projects.length === 0) return;
-  await db.projects.bulkPut(projects);
+  await safeWrite(() => db.projects.bulkPut(projects));
 }
 
 /**
@@ -140,7 +140,7 @@ export async function getProject(id) {
  * @returns {Promise<object>}
  */
 export async function createRecord(projectId, type, data) {
-  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await safeWrite(() => db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     let lastHlc = initialHlc;
 
@@ -188,7 +188,7 @@ export async function createRecord(projectId, type, data) {
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return record;
-  });
+  }));
   _notifyWrite();
   return result;
 }
@@ -202,7 +202,7 @@ export async function createRecord(projectId, type, data) {
  * @returns {Promise<object>}
  */
 export async function updateRecord(id, patch) {
-  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await safeWrite(() => db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const record = await db.records.get(id);
     if (!record) throw new Error(`Record not found: ${id}`);
 
@@ -246,7 +246,7 @@ export async function updateRecord(id, patch) {
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return updated;
-  });
+  }));
   _notifyWrite();
   return result;
 }
@@ -258,7 +258,7 @@ export async function updateRecord(id, patch) {
  * @returns {Promise<object>}
  */
 export async function deleteRecord(id) {
-  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await safeWrite(() => db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const record = await db.records.get(id);
     if (!record) throw new Error(`Record not found: ${id}`);
 
@@ -285,7 +285,7 @@ export async function deleteRecord(id) {
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return updated;
-  });
+  }));
   _notifyWrite();
   return result;
 }
@@ -297,7 +297,7 @@ export async function deleteRecord(id) {
  * @returns {Promise<object>}
  */
 export async function restoreRecord(id) {
-  const result = await db.transaction('rw', db.records, db.outbox, db.meta, async () => {
+  const result = await safeWrite(() => db.transaction('rw', db.records, db.outbox, db.meta, async () => {
     const record = await db.records.get(id);
     if (!record) throw new Error(`Record not found: ${id}`);
 
@@ -324,7 +324,7 @@ export async function restoreRecord(id) {
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return updated;
-  });
+  }));
   _notifyWrite();
   return result;
 }
@@ -412,7 +412,7 @@ const TRACK_META_FIELDS = ['name', 'status', 'started_at', 'ended_at'];
  * @returns {Promise<object>}
  */
 export async function createTrack(projectId, name) {
-  const result = await db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
+  const result = await safeWrite(() => db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
     const { deviceId, lastHlc: initialHlc } = await _readClockMeta();
     let lastHlc = initialHlc;
 
@@ -449,7 +449,7 @@ export async function createTrack(projectId, name) {
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return track;
-  });
+  }));
   _notifyWrite();
   return result;
 }
@@ -463,7 +463,7 @@ export async function createTrack(projectId, name) {
  * @returns {Promise<object>}
  */
 export async function updateTrack(id, patch) {
-  const result = await db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
+  const result = await safeWrite(() => db.transaction('rw', db.tracks, db.outbox, db.meta, async () => {
     const track = await db.tracks.get(id);
     if (!track) throw new Error(`Track not found: ${id}`);
 
@@ -496,7 +496,7 @@ export async function updateTrack(id, patch) {
     await db.meta.put({ key: 'hlc_last', value: lastHlc });
 
     return nextTrack;
-  });
+  }));
   _notifyWrite();
   return result;
 }
@@ -530,7 +530,7 @@ export async function getTrack(id) {
  */
 export async function bulkPutTrackPoints(points) {
   if (!Array.isArray(points) || points.length === 0) return;
-  await db.track_points.bulkPut(points);
+  await safeWrite(() => db.track_points.bulkPut(points));
   _notifyWrite();
 }
 
@@ -578,8 +578,10 @@ export async function markInterruptedTracks() {
  * @returns {Promise<Array<object>>}
  */
 export async function listConflicts({ onlyUnseen = false } = {}) {
-  const all = await db.conflicts.orderBy('id').toArray();
-  return onlyUnseen ? all.filter((c) => !c.seen) : all;
+  if (onlyUnseen) {
+    return db.conflicts.where('seen').equals(0).sortBy('id');
+  }
+  return db.conflicts.orderBy('id').toArray();
 }
 
 /**
@@ -587,8 +589,7 @@ export async function listConflicts({ onlyUnseen = false } = {}) {
  * @returns {Promise<number>}
  */
 export async function countUnseenConflicts() {
-  const all = await db.conflicts.toArray();
-  return all.filter((c) => !c.seen).length;
+  return db.conflicts.where('seen').equals(0).count();
 }
 
 /**
@@ -596,19 +597,18 @@ export async function countUnseenConflicts() {
  * @param {number} id
  */
 export async function markConflictSeen(id) {
-  await db.conflicts.update(id, { seen: 1 });
+  await safeWrite(() => db.conflicts.update(id, { seen: 1 }));
 }
 
 /**
  * Mark all unseen conflicts as seen.
  */
 export async function dismissAllConflicts() {
-  const all = await db.conflicts.toArray();
-  for (const c of all) {
-    if (!c.seen) {
-      await db.conflicts.update(c.id, { seen: 1 });
-    }
-  }
+  const unseen = await db.conflicts.where('seen').equals(0).toArray();
+  if (unseen.length === 0) return;
+  await safeWrite(() =>
+    db.conflicts.bulkPut(unseen.map((c) => ({ ...c, seen: 1 })))
+  );
 }
 
 // ─── Record last-seen tracking ────────────────────────────────────────────────
@@ -619,10 +619,12 @@ export async function dismissAllConflicts() {
  * @param {string} recordId
  */
 export async function markRecordSeen(recordId) {
-  const row = await db.meta.get('record_seen');
-  const map = { ...(row?.value || {}) };
-  map[recordId] = nowIso();
-  await db.meta.put({ key: 'record_seen', value: map });
+  await safeWrite(async () => {
+    const row = await db.meta.get('record_seen');
+    const map = { ...(row?.value || {}) };
+    map[recordId] = nowIso();
+    await db.meta.put({ key: 'record_seen', value: map });
+  });
 }
 
 /**

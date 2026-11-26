@@ -25,10 +25,11 @@ def _make_connection(path: Path | None = None) -> sqlite3.Connection:
     The caller is responsible for closing it.
     """
     target = path if path is not None else config.DB_PATH
-    conn = sqlite3.connect(str(target), check_same_thread=False)
+    conn = sqlite3.connect(str(target), timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     # WAL mode — better read/write concurrency under FastAPI's threading model.
     conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
     # Enforce FK constraints on every connection.
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn

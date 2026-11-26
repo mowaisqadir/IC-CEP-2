@@ -7,6 +7,7 @@ Sync endpoints:
 
 from datetime import datetime, timezone
 import json
+import logging
 import sqlite3
 import time
 from typing import Any
@@ -20,6 +21,7 @@ from app.hlc import is_clock_skewed
 from app.merge import merge_fields
 
 router = APIRouter(prefix="/sync", tags=["sync"])
+_logger = logging.getLogger("fieldsync.sync")
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +296,7 @@ def sync_push(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: sqlite3.Connection = Depends(get_db),
 ) -> PushResponse:
+    t0 = time.monotonic()
     user_id = current_user["id"]
     user_projects = _get_user_project_ids(db, user_id)
     server_now_ms = int(time.time() * 1000)
@@ -363,6 +366,23 @@ def sync_push(
     seq_row = db.execute("SELECT next_val FROM global_seq WHERE id = 1").fetchone()
     current_seq = seq_row["next_val"] if seq_row else 0
 
+    duration_ms = round((time.monotonic() - t0) * 1000, 2)
+    touched_projects = sorted({c.project_id for c in body.changes})
+    _logger.info(
+        json.dumps(
+            {
+                "event": "sync_push",
+                "user_id": user_id,
+                "device_id": body.device_id,
+                "projects": touched_projects,
+                "applied_count": len(applied),
+                "rejected_count": len(rejected),
+                "server_seq": current_seq,
+                "duration_ms": duration_ms,
+            }
+        )
+    )
+
     return PushResponse(
         applied=applied,
         rejected=rejected,
@@ -377,6 +397,7 @@ def sync_pull(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: sqlite3.Connection = Depends(get_db),
 ) -> PullResponse:
+    t0 = time.monotonic()
     user_id = current_user["id"]
 
     # Fetch limit + 1 rows across all three entity tables for the user's projects
@@ -409,6 +430,21 @@ def sync_pull(
     page_rows = union_rows[:limit]
 
     if not page_rows:
+        duration_ms = round((time.monotonic() - t0) * 1000, 2)
+        _logger.info(
+            json.dumps(
+                {
+                    "event": "sync_pull",
+                    "user_id": user_id,
+                    "projects": [],
+                    "since": since,
+                    "pulled_count": 0,
+                    "next_seq": since,
+                    "has_more": False,
+                    "duration_ms": duration_ms,
+                }
+            )
+        )
         return PullResponse(changes=[], next_seq=since, has_more=False)
 
     record_ids = [r["id"] for r in page_rows if r["entity"] == "record"]
@@ -522,6 +558,22 @@ def sync_pull(
         )
 
     next_cursor = page_rows[-1]["server_seq"]
+    duration_ms = round((time.monotonic() - t0) * 1000, 2)
+    pulled_projects = sorted({c.project_id for c in changes})
+    _logger.info(
+        json.dumps(
+            {
+                "event": "sync_pull",
+                "user_id": user_id,
+                "projects": pulled_projects,
+                "since": since,
+                "pulled_count": len(changes),
+                "next_seq": next_cursor,
+                "has_more": has_more,
+                "duration_ms": duration_ms,
+            }
+        )
+    )
     return PullResponse(
         changes=changes,
         next_seq=next_cursor,

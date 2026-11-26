@@ -8,7 +8,7 @@ import {
   clearToken,
   getToken,
 } from './api.js';
-import { getMeta, setMeta, deleteMeta } from './db.js';
+import { getMeta, setMeta, deleteMeta, isQuotaExceededError } from './db.js';
 
 let _memUser = null;
 
@@ -31,6 +31,7 @@ export async function initAuth() {
 export function setUser(user) {
   _memUser = user;
   return setMeta('user', user).catch((err) => {
+    if (isQuotaExceededError(err)) throw err;
     console.warn('[auth] Failed to persist user in meta:', err);
   });
 }

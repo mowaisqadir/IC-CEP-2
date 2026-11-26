@@ -15,6 +15,8 @@ import { RECORD_TYPES, getSchema, getTypeMeta }         from '../schemas.js';
 import { toast, createEmptyState, createLoadingState }  from './components.js';
 import { debounce, escapeHtml, formatDate }             from '../utils.js';
 
+const PAGE_SIZE = 50;
+
 /**
  * @param {{ projectId: string }} params
  * @param {HTMLElement}           container
@@ -60,8 +62,11 @@ export async function recordsView(params, container) {
     ...RECORD_TYPES,
     { key: 'deleted', label: 'Deleted', icon: '🗑️' },
   ];
-  let activeType = 'all';
-  let searchText = '';
+  let activeType   = 'all';
+  let searchText   = '';
+  let visibleCount = PAGE_SIZE;
+  let cachedRecords    = [];
+  let cachedPendingIds = new Set();
 
   for (const t of filterTypes) {
     const btn = document.createElement('button');
@@ -97,16 +102,23 @@ export async function recordsView(params, container) {
   fab.textContent = '+';
   container.appendChild(fab);
 
-  async function renderList() {
-    const isDeletedView = activeType === 'deleted';
-    const filters = isDeletedView
-      ? { showDeleted: true, search: searchText }
-      : { type: activeType, search: searchText, includeDeleted: false };
+  async function renderList({ resetPage = true } = {}) {
+    if (resetPage) {
+      visibleCount = PAGE_SIZE;
+      const isDeletedView = activeType === 'deleted';
+      const filters = isDeletedView
+        ? { showDeleted: true, search: searchText }
+        : { type: activeType, search: searchText, includeDeleted: false };
 
-    const [records, pendingIds] = await Promise.all([
-      listRecords(projectId, filters),
-      getPendingRecordIds(),
-    ]);
+      [cachedRecords, cachedPendingIds] = await Promise.all([
+        listRecords(projectId, filters),
+        getPendingRecordIds(),
+      ]);
+    }
+
+    const isDeletedView = activeType === 'deleted';
+    const records       = cachedRecords;
+    const pendingIds    = cachedPendingIds;
 
     listWrap.innerHTML = '';
 
@@ -127,9 +139,16 @@ export async function recordsView(params, container) {
       return;
     }
 
+    const slice = records.slice(0, visibleCount);
+    const countInfo = document.createElement('div');
+    countInfo.className = 'text-xs text-muted';
+    countInfo.style.marginBottom = 'var(--space-2)';
+    countInfo.textContent = `Showing ${slice.length} of ${records.length} observation${records.length === 1 ? '' : 's'}`;
+    listWrap.appendChild(countInfo);
+
     const list = document.createElement('div');
     list.className = 'list';
-    for (const rec of records) {
+    for (const rec of slice) {
       const hasTeammateChange = isRecordChangedByTeammate(
         rec,
         seenMap[rec.id] ?? null,
@@ -139,11 +158,25 @@ export async function recordsView(params, container) {
         _buildRecordCard(rec, pendingIds.has(rec.id), hasTeammateChange, async () => {
           await restoreRecord(rec.id);
           toast.success('Record restored.');
-          await renderList();
+          await renderList({ resetPage: true });
         })
       );
     }
     listWrap.appendChild(list);
+
+    if (records.length > visibleCount) {
+      const remaining = records.length - visibleCount;
+      const moreBtn = document.createElement('button');
+      moreBtn.type = 'button';
+      moreBtn.className = 'btn btn--secondary btn--full';
+      moreBtn.style.marginTop = 'var(--space-4)';
+      moreBtn.textContent = `Load ${Math.min(PAGE_SIZE, remaining)} more (${remaining} remaining)`;
+      moreBtn.addEventListener('click', () => {
+        visibleCount += PAGE_SIZE;
+        renderList({ resetPage: false });
+      });
+      listWrap.appendChild(moreBtn);
+    }
   }
 
   pills.addEventListener('click', (e) => {
@@ -155,18 +188,18 @@ export async function recordsView(params, container) {
       el.classList.toggle('active', isSelected);
       el.setAttribute('aria-selected', isSelected ? 'true' : 'false');
     });
-    renderList();
+    renderList({ resetPage: true });
   });
 
   searchInput.addEventListener(
     'input',
     debounce(() => {
       searchText = searchInput.value;
-      renderList();
+      renderList({ resetPage: true });
     }, 150)
   );
 
-  await renderList();
+  await renderList({ resetPage: true });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

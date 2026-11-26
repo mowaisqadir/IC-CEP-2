@@ -40,6 +40,51 @@ db.on('ready', async (vipDb) => {
   }
 });
 
+export class StorageQuotaError extends Error {
+  constructor(
+    message = 'Device storage is full (QuotaExceededError). Sync your pending data and free up device space before saving.'
+  ) {
+    super(message);
+    this.name = 'StorageQuotaError';
+  }
+}
+
+/**
+ * Return true if `err` represents an IndexedDB / Web Storage quota error.
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isQuotaExceededError(err) {
+  if (!err) return false;
+  if (err instanceof StorageQuotaError) return true;
+  const name = err.name || err.inner?.name || '';
+  const msg  = String(err.message || err.inner?.message || '').toLowerCase();
+  return (
+    name === 'QuotaExceededError' ||
+    name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    msg.includes('quota')
+  );
+}
+
+/**
+ * Execute an async Dexie write operation and convert QuotaExceededError into a
+ * clear, user-facing StorageQuotaError without silent data loss.
+ *
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export async function safeWrite(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      throw new StorageQuotaError();
+    }
+    throw err;
+  }
+}
+
 /**
  * Read a value from the `meta` key/value store.
  * @param {string} key
@@ -57,7 +102,7 @@ export async function getMeta(key) {
  * @returns {Promise<void>}
  */
 export async function setMeta(key, value) {
-  await db.meta.put({ key, value });
+  await safeWrite(() => db.meta.put({ key, value }));
 }
 
 /**

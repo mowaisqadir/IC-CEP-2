@@ -10,9 +10,9 @@ Media upload/download endpoints:
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any
+import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
@@ -24,15 +24,46 @@ from app.db import get_db, next_seq
 router = APIRouter(prefix="/media", tags=["media"])
 
 _ALLOWED_MIMES = {"image/jpeg", "image/png", "image/webp"}
-_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
-def _validate_safe_id(value: str, label: str = "id") -> None:
-    if not _SAFE_ID_RE.match(value):
+def _validate_uuid(value: str, label: str = "id") -> str:
+    """Validate that `value` is a valid UUID string (prevents path traversal)."""
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid {label}.",
+            detail=f"Invalid {label} (must be a UUID).",
+        ) from exc
+    if str(parsed) != value.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {label} (must be canonical UUID).",
         )
+    return str(parsed)
+
+
+def _safe_media_path(project_id: str, filename: str) -> Path:
+    """Resolve a media path and verify it stays strictly within MEDIA_DIR."""
+    base = config.MEDIA_DIR.resolve()
+    target = (base / project_id / filename).resolve()
+    if not target.is_relative_to(base):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid media path.",
+        )
+    return target
+
+
+def _sniff_image_mime(header: bytes) -> str | None:
+    """Sniff image MIME type from magic bytes for JPEG, PNG, or WebP."""
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _require_membership(db: sqlite3.Connection, project_id: str, user_id: str) -> None:
@@ -59,14 +90,21 @@ def _parse_optional_int(value: str | None, header_name: str) -> int | None:
         ) from exc
 
 
-async def _stream_to_file(request: Request, dest_path: Path, max_bytes: int) -> int:
+async def _stream_to_file(
+    request: Request,
+    dest_path: Path,
+    max_bytes: int,
+    expected_mime: str | None = None,
+) -> int:
     """
-    Stream request body into a temporary file, enforcing max_bytes, then
-    atomically rename to dest_path. Returns total bytes written.
+    Stream request body into a temporary file, enforcing max_bytes and magic-byte
+    image MIME validation, then atomically rename to dest_path.
+    Returns total bytes written.
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest_path.with_name(f".{dest_path.name}.tmp")
     total_size = 0
+    header_buf = bytearray()
 
     try:
         with tmp_path.open("wb") as fh:
@@ -79,7 +117,23 @@ async def _stream_to_file(request: Request, dest_path: Path, max_bytes: int) -> 
                         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         detail=f"Upload exceeds maximum size of {max_bytes} bytes.",
                     )
+                if len(header_buf) < 16:
+                    need = 16 - len(header_buf)
+                    header_buf.extend(chunk[:need])
                 fh.write(chunk)
+
+        sniffed = _sniff_image_mime(bytes(header_buf))
+        if sniffed is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid image content. Allowed formats: JPEG, PNG, WebP.",
+            )
+        if expected_mime is not None and sniffed != expected_mime:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image content ({sniffed}) does not match declared X-Mime ({expected_mime}).",
+            )
+
         os.replace(tmp_path, dest_path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -115,8 +169,9 @@ async def upload_media(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, Any]:
-    _validate_safe_id(media_id, "media_id")
-    _validate_safe_id(x_project_id, "project_id")
+    media_id = _validate_uuid(media_id, "media_id")
+    x_project_id = _validate_uuid(x_project_id, "project_id")
+    x_record_id = _validate_uuid(x_record_id, "record_id")
     _require_membership(db, x_project_id, current_user["id"])
 
     if x_mime not in _ALLOWED_MIMES:
@@ -157,8 +212,8 @@ async def upload_media(
             detail="Referenced record does not exist in this project.",
         )
 
-    dest_path = config.MEDIA_DIR / x_project_id / media_id
-    size = await _stream_to_file(request, dest_path, config.MAX_UPLOAD_BYTES)
+    dest_path = _safe_media_path(x_project_id, media_id)
+    size = await _stream_to_file(request, dest_path, config.MAX_UPLOAD_BYTES, expected_mime=x_mime)
 
     created_at = datetime.now(timezone.utc).isoformat()
     if db.in_transaction:
@@ -228,7 +283,7 @@ async def upload_media_thumb(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, Any]:
-    _validate_safe_id(media_id, "media_id")
+    media_id = _validate_uuid(media_id, "media_id")
 
     row = db.execute(
         "SELECT id, project_id FROM media WHERE id = ?",
@@ -239,7 +294,7 @@ async def upload_media_thumb(
 
     _require_membership(db, row["project_id"], current_user["id"])
 
-    thumb_path = config.MEDIA_DIR / row["project_id"] / f"{media_id}.thumb"
+    thumb_path = _safe_media_path(row["project_id"], f"{media_id}.thumb")
     if thumb_path.exists():
         return {"id": media_id, "size": thumb_path.stat().st_size}
 
@@ -253,7 +308,7 @@ def get_media(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: sqlite3.Connection = Depends(get_db),
 ) -> FileResponse:
-    _validate_safe_id(media_id, "media_id")
+    media_id = _validate_uuid(media_id, "media_id")
 
     row = db.execute(
         "SELECT id, project_id, mime FROM media WHERE id = ?",
@@ -264,7 +319,7 @@ def get_media(
 
     _require_membership(db, row["project_id"], current_user["id"])
 
-    file_path = config.MEDIA_DIR / row["project_id"] / media_id
+    file_path = _safe_media_path(row["project_id"], media_id)
     if not file_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media file missing.")
 
@@ -277,7 +332,7 @@ def get_media_thumb(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: sqlite3.Connection = Depends(get_db),
 ) -> FileResponse:
-    _validate_safe_id(media_id, "media_id")
+    media_id = _validate_uuid(media_id, "media_id")
 
     row = db.execute(
         "SELECT id, project_id, mime FROM media WHERE id = ?",
@@ -288,7 +343,7 @@ def get_media_thumb(
 
     _require_membership(db, row["project_id"], current_user["id"])
 
-    thumb_path = config.MEDIA_DIR / row["project_id"] / f"{media_id}.thumb"
+    thumb_path = _safe_media_path(row["project_id"], f"{media_id}.thumb")
     if not thumb_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail not found.")
 

@@ -2,9 +2,10 @@
 // Settings screen: account, device/sync, storage quota, dead letters,
 // "Sync now" panel, and optional dev/debug section.
 
-import { getMeta, setMeta, db }  from '../db.js';
+import { getMeta, setMeta, db, safeWrite }  from '../db.js';
 import { getUser, logout }       from '../auth.js';
 import { getOutboxCount }        from '../repo.js';
+import { now as hlcNow }         from '../hlc.js';
 import {
   getStorageStatus,
   requestPersistentStorage,
@@ -16,7 +17,7 @@ import {
   runSync,
 } from '../sync.js';
 import { createPageHeader, toast } from './components.js';
-import { escapeHtml }             from '../utils.js';
+import { escapeHtml, uuid, nowIso } from '../utils.js';
 
 /**
  * @param {object}      _params
@@ -33,8 +34,11 @@ export async function settingsView(_params, container) {
   ]);
   const user = getUser();
 
-  // Show dev panel only when ?debug=1 is in the URL
-  const isDebug = new URLSearchParams(window.location.search).get('debug') === '1';
+  // Show dev panel when ?debug=1 is in either location.search or location.hash
+  const hashQuery = window.location.hash.includes('?') ? window.location.hash.split('?')[1] : '';
+  const isDebug =
+    new URLSearchParams(window.location.search).get('debug') === '1' ||
+    new URLSearchParams(hashQuery).get('debug') === '1';
 
   const stack = document.createElement('div');
   stack.className = 'stack';
@@ -146,6 +150,35 @@ export async function settingsView(_params, container) {
     }
   }
   stack.appendChild(storageCard);
+
+  // ── Local Backup / Export card ─────────────────────────────────────────────
+  const backupCard = document.createElement('div');
+  backupCard.className = 'card stack stack--sm';
+  backupCard.innerHTML = `
+    <div class="card__title">Local Backup</div>
+    <p class="text-sm text-muted">Export all local observations, tracks, and metadata as a last-resort backup (JSON or CSV; photo binaries are excluded).</p>
+    <div class="row" style="gap:var(--space-2)">
+      <button type="button" id="export-json-btn" class="btn btn--secondary" style="flex:1">⬇️ Export JSON</button>
+      <button type="button" id="export-csv-btn" class="btn btn--secondary" style="flex:1">⬇️ Export CSV</button>
+    </div>
+  `;
+  backupCard.querySelector('#export-json-btn').addEventListener('click', async () => {
+    try {
+      await _exportLocalJson();
+      toast.success('Local data exported as JSON.');
+    } catch (err) {
+      toast.error(err.message || 'Failed to export JSON.');
+    }
+  });
+  backupCard.querySelector('#export-csv-btn').addEventListener('click', async () => {
+    try {
+      await _exportLocalCsv();
+      toast.success('Records exported as CSV.');
+    } catch (err) {
+      toast.error(err.message || 'Failed to export CSV.');
+    }
+  });
+  stack.appendChild(backupCard);
 
   // ── Dead Letters card ──────────────────────────────────────────────────────
   const deadLetters = (await getMeta('dead_letters')) || [];
@@ -317,9 +350,25 @@ async function _buildDebugCard(_params, mainContainer, unsubSync) {
         <dd class="detail-list__value"><code>${conflictsCnt}</code></dd>
       </div>
     </dl>
+    <button type="button" id="debug-seed-btn" class="btn btn--secondary">Seed 5,000 Records + 500 Photos</button>
     <button type="button" id="debug-dump-btn" class="btn btn--secondary">Dump to Console</button>
     <button type="button" id="debug-reset-btn" class="btn btn--danger">Reset Local Database…</button>
   `;
+
+  card.querySelector('#debug-seed-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Seeding…';
+    try {
+      const stats = await _seedBenchmarkData();
+      toast.success(`Seeded ${stats.records} records & ${stats.photos} photos in ${stats.ms} ms.`);
+    } catch (err) {
+      toast.error(err.message || 'Seeding failed.');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Seed 5,000 Records + 500 Photos';
+    }
+  });
 
   card.querySelector('#debug-dump-btn').addEventListener('click', async () => {
     const dump = {
@@ -366,4 +415,190 @@ async function _buildDebugCard(_params, mainContainer, unsubSync) {
   });
 
   return card;
+}
+
+// ─── Local Backup Export Helpers ──────────────────────────────────────────────
+
+function _triggerDownload(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function _exportLocalJson() {
+  const [projects, records, tracks, trackPoints, outbox, conflicts] = await Promise.all([
+    db.projects.toArray(),
+    db.records.toArray(),
+    db.tracks.toArray(),
+    db.track_points.toArray(),
+    db.outbox.toArray(),
+    db.conflicts.toArray(),
+  ]);
+
+  // Stream media metadata without loading binary blobs into memory
+  const mediaMeta = [];
+  await db.media.each((m) => {
+    mediaMeta.push({
+      id:           m.id,
+      record_id:    m.record_id,
+      project_id:   m.project_id,
+      mime:         m.mime,
+      size:         m.size,
+      width:        m.width,
+      height:       m.height,
+      created_by:   m.created_by,
+      created_at:   m.created_at,
+      upload_state: m.upload_state,
+      deleted:      Boolean(m.deleted),
+    });
+  });
+
+  const payload = {
+    exported_at:  nowIso(),
+    projects,
+    records,
+    media:        mediaMeta,
+    tracks,
+    track_points: trackPoints,
+    outbox,
+    conflicts,
+  };
+  const stamp = nowIso().slice(0, 19).replace(/[:T]/g, '-');
+  _triggerDownload(`fieldsync-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
+}
+
+function _csvCell(val) {
+  if (val === null || val === undefined) return '';
+  const s = String(val);
+  if (/[",\r\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+async function _exportLocalCsv() {
+  const records = await db.records.toArray();
+  const headers = [
+    'id', 'project_id', 'type', 'created_by', 'created_at', 'deleted',
+    'lat', 'lng', 'accuracy', 'altitude', 'notes', 'data_json',
+  ];
+  const lines = [headers.join(',')];
+  for (const r of records) {
+    const d = r.data || {};
+    lines.push([
+      r.id,
+      r.project_id,
+      r.type,
+      r.created_by,
+      r.created_at,
+      r.deleted ? 'true' : 'false',
+      d.lat ?? '',
+      d.lng ?? '',
+      d.accuracy ?? '',
+      d.altitude ?? '',
+      d.notes ?? '',
+      JSON.stringify(d),
+    ].map(_csvCell).join(','));
+  }
+  const stamp = nowIso().slice(0, 19).replace(/[:T]/g, '-');
+  _triggerDownload(`fieldsync-records-${stamp}.csv`, lines.join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+// ─── Dev-only Benchmark Seeding (5,000 records + 500 photos) ───────────────────
+
+async function _seedBenchmarkData() {
+  const start = performance.now();
+  const projects = await db.projects.toArray();
+  let projectId = await getMeta('last_project_id');
+  if (!projectId && projects.length > 0) projectId = projects[0].id;
+  if (!projectId) {
+    projectId = uuid();
+    await safeWrite(() => db.projects.put({
+      id: projectId,
+      name: 'Benchmark Project',
+      region: 'Dev',
+      description: 'Generated for 5k/500 performance verification',
+    }));
+  }
+
+  const user = getUser();
+  const userId = user?.id || 'dev-user';
+  const deviceId = (await getMeta('device_id')) || 'dev-bench';
+  let lastHlc = await getMeta('hlc_last');
+  const types = ['soil', 'water', 'wildlife'];
+  const baseMs = Date.now() - 5_000_000;
+
+  const recordIds = [];
+  const RECORD_TOTAL = 5000;
+  const BATCH_SIZE = 500;
+
+  for (let offset = 0; offset < RECORD_TOTAL; offset += BATCH_SIZE) {
+    const batch = [];
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const idx = offset + i;
+      const id = uuid();
+      const t = types[idx % 3];
+      lastHlc = hlcNow(lastHlc, deviceId);
+      const data = t === 'soil'
+        ? { site_name: `Plot-${idx}`, ph: 6.5, moisture_pct: 30 + (idx % 40), notes: `Seeded #${idx}` }
+        : t === 'water'
+          ? { source: 'river', ph: 7.1, turbidity_ntu: 10 + (idx % 50), notes: `Seeded #${idx}` }
+          : { species: `Species-${idx % 50}`, count: (idx % 12) + 1, notes: `Seeded #${idx}` };
+
+      recordIds.push(id);
+      batch.push({
+        id,
+        project_id: projectId,
+        type: t,
+        data,
+        fv: { notes: lastHlc },
+        field_authors: {},
+        created_by: userId,
+        created_at: new Date(baseMs + idx * 1000).toISOString(),
+        deleted: false,
+        deleted_hlc: null,
+      });
+    }
+    await safeWrite(() => db.records.bulkAdd(batch));
+  }
+
+  // Minimal 1x1 JPEG header + EOI bytes
+  const tinyJpeg = new Blob(
+    [new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9])],
+    { type: 'image/jpeg' }
+  );
+  const PHOTO_TOTAL = 500;
+  const PHOTO_BATCH = 100;
+  for (let offset = 0; offset < PHOTO_TOTAL; offset += PHOTO_BATCH) {
+    const batch = [];
+    for (let i = 0; i < PHOTO_BATCH; i++) {
+      const idx = offset + i;
+      batch.push({
+        id: uuid(),
+        record_id: recordIds[idx],
+        project_id: projectId,
+        mime: 'image/jpeg',
+        size: tinyJpeg.size,
+        width: 1,
+        height: 1,
+        blob: tinyJpeg,
+        thumb_blob: tinyJpeg,
+        created_by: userId,
+        created_at: nowIso(),
+        upload_state: 'done',
+        meta_synced: true,
+        deleted: false,
+      });
+    }
+    await safeWrite(() => db.media.bulkAdd(batch));
+  }
+
+  await setMeta('hlc_last', lastHlc);
+  return { records: RECORD_TOTAL, photos: PHOTO_TOTAL, ms: Math.round(performance.now() - start) };
 }

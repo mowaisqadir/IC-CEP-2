@@ -8,7 +8,7 @@
 // Concurrency guard: navigator.locks (fallback: in-memory flag).
 // Backoff: 5 s → 5 min exponential, reset on success.
 
-import { db, getMeta, setMeta }     from './db.js';
+import { db, getMeta, setMeta, safeWrite, isQuotaExceededError } from './db.js';
 import { receive as hlcReceive }     from './hlc.js';
 import { mergeFields }               from './merge.js';
 import {
@@ -300,7 +300,7 @@ async function _pull(deviceId, lastHlc) {
 
     // Apply all changes for this page in ONE Dexie transaction,
     // only advancing last_pull_seq after everything commits.
-    await db.transaction(
+    await safeWrite(() => db.transaction(
       'rw',
       db.records, db.tracks, db.media, db.outbox, db.conflicts, db.meta,
       async () => {
@@ -319,7 +319,7 @@ async function _pull(deviceId, lastHlc) {
           await db.meta.put({ key: 'hlc_last', value: currentHlc });
         }
       }
-    );
+    ));
 
     since = nextSeq;
     if (!page.has_more) break;
@@ -651,14 +651,12 @@ async function _uploadTrackPoints() {
 
       try {
         await apiPostTrackPoints(trackId, payload);
-        // Mark synced=1 in a transaction
-        await db.transaction('rw', db.track_points, async () => {
-          for (const pt of batch) {
-            await db.track_points.update([pt.track_id, pt.idx], { synced: 1 });
-          }
-        });
+        // Mark synced=1 in a single batched bulkPut
+        await safeWrite(() =>
+          db.track_points.bulkPut(batch.map((pt) => ({ ...pt, synced: 1 })))
+        );
       } catch (err) {
-        if (err instanceof AuthError) throw err;
+        if (err instanceof AuthError || isQuotaExceededError(err)) throw err;
         // Keep for next cycle — don't abort other tracks
         console.warn(`[sync] track points upload failed for ${trackId}:`, err.message);
       }
@@ -847,8 +845,7 @@ function _updateHeaderBadge() {
 
 async function _updateConflictsBadge() {
   try {
-    const all = await db.conflicts.toArray();
-    const count = all.filter((c) => !c.seen).length;
+    const count = await db.conflicts.where('seen').equals(0).count();
     const nav = document.getElementById('conflicts-nav');
     const textEl = document.getElementById('conflicts-badge-text');
     if (!nav || !textEl) return;

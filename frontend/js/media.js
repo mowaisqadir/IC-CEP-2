@@ -2,7 +2,7 @@
 // Offline photo capture, resizing, thumbnail generation, and Dexie media helpers.
 // Note: Remote deletion of media is out of scope for v1 (soft-delete is local only).
 
-import { db, getMeta, setMeta } from './db.js';
+import { db, getMeta, setMeta, safeWrite, isQuotaExceededError } from './db.js';
 import { notifyWrite }            from './repo.js';
 import { apiGetMediaThumb, apiGetMediaFull } from './api.js';
 import { uuid, nowIso }          from './utils.js';
@@ -198,7 +198,7 @@ export async function addPhoto(recordId, file) {
 
   const processed = await processImage(file);
 
-  const row = await db.transaction('rw', db.media, db.records, db.meta, async () => {
+  const row = await safeWrite(() => db.transaction('rw', db.media, db.records, db.meta, async () => {
     const record = await db.records.get(recordId);
     if (!record) {
       throw new Error(`Record not found: ${recordId}`);
@@ -226,7 +226,7 @@ export async function addPhoto(recordId, file) {
 
     await db.media.add(mediaRow);
     return mediaRow;
-  });
+  }));
   notifyWrite();
   return row;
 }
@@ -252,7 +252,7 @@ export async function listMediaForRecord(recordId) {
  * @returns {Promise<void>}
  */
 export async function softDeleteMedia(mediaId) {
-  await db.media.update(mediaId, { deleted: true });
+  await safeWrite(() => db.media.update(mediaId, { deleted: true }));
 }
 
 /**
@@ -265,9 +265,10 @@ export async function fetchAndStoreThumb(mediaId) {
   if (!navigator.onLine) return null;
   try {
     const blob = await apiGetMediaThumb(mediaId);
-    await db.media.update(mediaId, { thumb_blob: blob });
+    await safeWrite(() => db.media.update(mediaId, { thumb_blob: blob }));
     return blob;
-  } catch {
+  } catch (err) {
+    if (isQuotaExceededError(err)) throw err;
     return null;
   }
 }
@@ -282,16 +283,18 @@ export async function fetchAndStoreFull(mediaId) {
   if (!navigator.onLine) return null;
   try {
     const blob = await apiGetMediaFull(mediaId);
-    await db.media.update(mediaId, { blob });
+    await safeWrite(() => db.media.update(mediaId, { blob }));
     return blob;
-  } catch {
+  } catch (err) {
+    if (isQuotaExceededError(err)) throw err;
     return null;
   }
 }
 
 /**
  * Prefetch all missing thumbnails for a project (for offline use).
- * Respects the storage quota check from Phase 4.
+ * Respects the storage quota check from Phase 4 and streams IDs without
+ * retaining media blobs in memory.
  * @param {string} projectId
  * @param {(done: number, total: number) => void} [onProgress]
  * @returns {Promise<{ done: number, failed: number, total: number }>}
@@ -299,21 +302,23 @@ export async function fetchAndStoreFull(mediaId) {
 export async function prefetchProjectThumbs(projectId, onProgress) {
   await assertSufficientStorage();
 
-  const all = await db.media.where('project_id').equals(projectId).toArray();
-  const needsThumb = all.filter(
-    (m) => !m.deleted && m.upload_state === 'remote' && !m.thumb_blob
-  );
+  const needsThumbIds = [];
+  await db.media.where('project_id').equals(projectId).each((m) => {
+    if (!m.deleted && m.upload_state === 'remote' && !m.thumb_blob) {
+      needsThumbIds.push(m.id);
+    }
+  });
 
-  const total = needsThumb.length;
+  const total = needsThumbIds.length;
   if (onProgress) onProgress(0, total);
   if (total === 0) return { done: 0, failed: 0, total: 0 };
 
   let done = 0;
   let failed = 0;
 
-  for (const m of needsThumb) {
+  for (const mediaId of needsThumbIds) {
     await assertSufficientStorage();
-    const result = await fetchAndStoreThumb(m.id);
+    const result = await fetchAndStoreThumb(mediaId);
     if (result) done += 1;
     else failed += 1;
     if (onProgress) onProgress(done + failed, total);

@@ -1,0 +1,12 @@
+# deploy/Caddyfile
+# Replace fieldsync.example.org with your domain name.
+# Caddy automatically provisions and renews Let's Encrypt HTTPS certificates.
+
+fieldsync.example.org {
+    encode gzip zstd
+
+    reverse_proxy 127.0.0.1:8000 {
+        header_up X-Real-IP {remote_host}
+    }
+}
+
